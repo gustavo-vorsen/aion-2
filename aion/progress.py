@@ -172,21 +172,55 @@ def overall_fraction() -> float:
     return _mean(PAGES.values())
 
 
-def fill_badge(frac: float | None) -> None:
+def fill_badge(frac: float | None, key: str | None = None) -> None:
+    """Fill badge; at 100 % it is yellow until validated (then green), with the Validated switch beside it."""
     if frac is None:
         return
-    st.badge(f"{frac:.0%} filled", icon=":material/check_circle:" if frac >= 1 else ":material/error:",
-             color="green" if frac >= 1 else "orange")
+    ok = validated(key) if key else True
+    color = "orange" if frac < 1 else ("green" if ok else "yellow")
+    st.badge(f"{frac:.0%} filled", icon=":material/check_circle:" if frac >= 1 else ":material/error:", color=color)
+    if key and frac >= 1:
+        validate_toggle(key)
 
 
 def tab_done(page_file: str, tab: str) -> None:
     """Start of a tab's content: its tables count toward this tab; shows the tab's fill badge."""
     st.session_state["_fill_ctx"] = f"{page_file}:{tab}"
-    fill_badge(fraction(f"{page_file}:{tab}"))
+    with st.container(horizontal=True, vertical_alignment="center"):
+        fill_badge(fraction(f"{page_file}:{tab}"), key=f"{page_file}:{tab}")
 
 
 DONE_MARK = ":green[:material/check_circle:]"
+FILLED_MARK = ":yellow[:material/check_circle:]"  # 100 % filled, not validated yet
 TODO_MARK = ":orange[:material/error:]"
+
+# Validation phase: a complete page / tab / table shows a yellow tick until you validate it (green).
+VALID_PREFIX = "valid:"
+
+
+def validations() -> set[str]:
+    if st.session_state.get("_valid_run") != st.session_state.get("_run_id") or "_valid" not in st.session_state:
+        df = db.read_table("progress")
+        st.session_state["_valid"] = {k[len(VALID_PREFIX):] for k, v in zip(df["key"], df["done"])
+                                      if str(k).startswith(VALID_PREFIX) and v}
+        st.session_state["_valid_run"] = st.session_state.get("_run_id")
+    return st.session_state["_valid"]
+
+
+def validated(key: str) -> bool:
+    return key in validations()
+
+
+def _save_validation(key: str, wk: str) -> None:
+    db.upsert("progress", {"key": VALID_PREFIX + key}, {"done": bool(st.session_state[wk])})
+    st.session_state.pop("_valid_run", None)
+
+
+def validate_toggle(key: str, label: str = "Validated") -> None:
+    """Switch that turns a complete item's yellow tick green."""
+    wk = f"validate__{key}"
+    st.toggle(label, value=validated(key), key=wk, on_change=_save_validation, args=(key, wk),
+              help="Turn on after checking the values: the yellow tick becomes green.")
 
 
 def page_tag(page: PageDef, data) -> str:
@@ -202,8 +236,11 @@ def page_tag(page: PageDef, data) -> str:
     return page.tag.format(n=f"{n:g}" if n is not None else "∞")
 
 
-def mark(done: bool) -> str:
-    return DONE_MARK if done else TODO_MARK
+def mark(done: bool, key: str | None = None) -> str:
+    """! while incomplete; when complete: yellow until `key` is validated, then green."""
+    if not done:
+        return TODO_MARK
+    return DONE_MARK if key is None or validated(key) else FILLED_MARK
 
 
 def tab_label(page_file: str, tab: str, label: str) -> str:
@@ -211,7 +248,7 @@ def tab_label(page_file: str, tab: str, label: str) -> str:
     frac = fraction(f"{page_file}:{tab}")
     if frac is None:
         return label
-    return f"{mark(frac >= 1)} {label} · {frac:.0%}"
+    return f"{mark(frac >= 1, f'{page_file}:{tab}')} {label} · {frac:.0%}"
 
 
 def _remember_tab(page_file: str, widget_key: str, key_by_label: dict[str, str]) -> None:

@@ -155,13 +155,47 @@ def reward_grid_counts(activity_ids: list[int]) -> tuple[float, float]:
     return float(len(have)), float(len(activity_ids) * len(keys))
 
 
+def _sort_filter(df: pd.DataFrame, row_keys: list[dict], key: str, config: dict) -> tuple[pd.DataFrame, list[dict]]:
+    """Sort / filter toolbar above a table (Streamlit turns off header sorting on tables that can add rows).
+    Rows keep their database keys, so edits still reach the right row in any order."""
+    if len(df) < 3:
+        return df, row_keys
+
+    def label(c: str) -> str:
+        cfg = config.get(c)
+        name = cfg.get("label") if isinstance(cfg, dict) else None
+        return name or GROUP_LABELS.get(c) or str(c).replace("_", " ").capitalize()
+
+    cols = [c for c in df.columns if config.get(c, True) is not None]
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        by = st.selectbox("Sort by", cols, index=None, format_func=label, key=f"{key}__sort",
+                          placeholder="Sort by…", label_visibility="collapsed", width=220)
+        desc = st.segmented_control("Order", ["asc", "desc"], default="asc", required=True, key=f"{key}__order",
+                                    label_visibility="collapsed",
+                                    format_func={"asc": ":material/arrow_upward:", "desc": ":material/arrow_downward:"}.get)
+        text = st.text_input("Filter", key=f"{key}__filter", placeholder="Filter rows…",
+                             label_visibility="collapsed", width=220, icon=":material/search:")
+    order = df.index
+    if text:
+        hit = df.astype(str).apply(lambda col: col.str.contains(text, case=False, regex=False)).any(axis=1)
+        order = order[hit.values]
+    if by:
+        col = df.loc[order, by]
+        num = pd.to_numeric(col, errors="coerce")
+        keyed = num if num.notna().sum() >= col.notna().sum() else col.astype(str).str.lower()
+        order = keyed.sort_values(ascending=desc != "desc", na_position="last", kind="stable").index
+    if len(order) == len(df) and (order == df.index).all():
+        return df, row_keys
+    return df.loc[order].reset_index(drop=True), [row_keys[i] for i in order]
+
+
 def editor(df: pd.DataFrame, key: str, row_keys: list[dict], on_update: Callable,
            on_insert: Callable | None = None, on_delete: Callable | None = None, **kw) -> pd.DataFrame:
     """st.data_editor that writes every change straight to SQLite (and counts toward the page's fill %)."""
     track_fill(df, {c for c in (kw.get("disabled") or []) if isinstance(c, str)})
     num_rows = "dynamic" if (on_insert and on_delete) else "add" if on_insert else "delete" if on_delete else "fixed"
     wkey = f"{key}__v{st.session_state.get(f'_ver_{key}', 0)}"
-    data = df.reset_index(drop=True)
+    data, row_keys = _sort_filter(df.reset_index(drop=True), row_keys, key, kw.get("column_config") or {})
     read_only = [c for c in (kw.get("disabled") or []) if isinstance(c, str) and c in data.columns]
     if read_only:
         # Styler colors only apply to non-editable columns: gray them out.
@@ -223,6 +257,7 @@ def activity_columns() -> dict:
     return {
         "tier": cc.SelectboxColumn("Tier", options=_options(TIER_OPTIONS, "tier")),
         "dungeon": cc.TextColumn("Dungeon", pinned=True),
+        "odyle_per_claim": cc.NumberColumn("Odyle / claim", min_value=0),
         "mode": cc.SelectboxColumn("Mode", options=_options(MODE_OPTIONS, "mode")),
         "name": cc.TextColumn("Activity", pinned=True, width="medium"),
         "category": cc.TextColumn("Category"),
@@ -613,6 +648,9 @@ def tier_reward_editor(category: str, tiers: TierGroups, columns: list[tuple[str
 
     done = tier_completion(category, key, tiers, columns)
 
+    def vkey(path: tuple[str, ...]) -> str:
+        return f"{key}:" + " · ".join(path)
+
     def complete(prefix: tuple[str, ...]) -> bool:
         return all(ok for p, ok in done.items() if p[:len(prefix)] == prefix)
 
@@ -627,7 +665,8 @@ def tier_reward_editor(category: str, tiers: TierGroups, columns: list[tuple[str
         names = list(groups)
         depth = len(path)
         if depth >= 2:
-            for tab, name in zip(st.tabs([f"{progress.mark(complete((*path, n)))} {n}" for n in names]), names):
+            for tab, name in zip(st.tabs([f"{progress.mark(complete((*path, n)), vkey((*path, n)))} {n}"
+                                          for n in names]), names):
                 with tab:
                     tabs(groups[name], (*path, name))
             return
@@ -640,12 +679,16 @@ def tier_reward_editor(category: str, tiers: TierGroups, columns: list[tuple[str
             if depth == 0:  # top level: buttons
                 choice = st.segmented_control(
                     what, names, required=True, key=pk, label_visibility="collapsed", width="stretch",
-                    format_func=lambda n: f"{progress.mark(complete((*path, n)))} {icon} {n}") or names[0]
+                    format_func=lambda n: f"{progress.mark(complete((*path, n)), vkey((*path, n)))} {icon} {n}"
+                ) or names[0]
             else:  # second level: pills
                 choice = st.pills(
                     what, names, required=True, key=pk, label_visibility="collapsed",
-                    format_func=lambda n: f"{progress.mark(complete((*path, n)))} {icon} {n}") or names[0]
+                    format_func=lambda n: f"{progress.mark(complete((*path, n)), vkey((*path, n)))} {icon} {n}"
+                ) or names[0]
             group_menu(path, choice, what)
+            if complete((*path, choice)):
+                progress.validate_toggle(vkey((*path, choice)), f"{choice} validated")
         if depth == 0:
             with st.container(border=True):
                 st.markdown(f"##### {icon} {choice}")
@@ -1005,17 +1048,19 @@ def _save_entries(aid: int, keys: dict[str, str], per_key: str) -> None:
 
 
 def _save_claims(category: str, keys: dict[str, str]) -> None:
-    v = {k: st.session_state[wk] for k, wk in keys.items()}
+    v = {k: st.session_state.get(wk) for k, wk in keys.items()}
     free = float(v["claims"] or 0)
-    db.execute("UPDATE activities SET odyle_per_claim = ?, reward_claims_per_attempt = ?, membership_extra_claims = ?, "
-               "scope = ? WHERE category = ?",
-               [float(v["odyle"] or 0), free, max(float(v["claims_m"] or 0) - free, 0.0), v["scope"], category])
+    db.execute("UPDATE activities SET reward_claims_per_attempt = ?, membership_extra_claims = ?, scope = ? "
+               "WHERE category = ?", [free, max(float(v["claims_m"] or 0) - free, 0.0), v["scope"], category])
+    if v["odyle"] is not None:  # absent when Odyle is set per row
+        db.execute("UPDATE activities SET odyle_per_claim = ? WHERE category = ?", [float(v["odyle"]), category])
     invalidate()
 
 
-def claims_box(category: str) -> None:
+def claims_box(category: str, odyle_per_row: bool = False) -> None:
     """Settings shared by every row of an Odyle-claim page (Expedition, Transcendence), laid out like entries_box:
-    a no-membership row and a membership row (grayed computed value at the end), then the shared fields."""
+    a no-membership row and a membership row (grayed computed value at the end), then the shared fields.
+    odyle_per_row: Odyle per claim differs per row (set in the table), so it is not in the box."""
     acts = data().activities
     acts = acts[acts["category"] == category]
     if acts.empty:
@@ -1033,11 +1078,13 @@ def claims_box(category: str) -> None:
                 st.number_input(f"Claims per run ({who})", value=n, min_value=0.0, step=1.0, key=keys[k],
                                 on_change=_save_claims, args=args,
                                 help=None if k == "claims" else "Each extra claim costs its own Odyle.")
-                st.text_input(f"Odyle per run ({who})", value=f"{n * odyle:,.0f}", disabled=True,
-                              key=f"claims__{category}__cost_{k}__{n * odyle}")  # text: no +/- steppers
+                cost = f"{n:g} × each dungeon's Odyle" if odyle_per_row else f"{n * odyle:,.0f}"
+                st.text_input(f"Odyle per run ({who})", value=cost, disabled=True,
+                              key=f"claims__{category}__cost_{k}__{cost}")  # text: no +/- steppers
         with st.container(horizontal=True):
-            st.number_input("Odyle per claim", value=odyle, min_value=0.0, step=5.0, key=keys["odyle"],
-                            on_change=_save_claims, args=args)
+            if not odyle_per_row:
+                st.number_input("Odyle per claim", value=odyle, min_value=0.0, step=5.0, key=keys["odyle"],
+                                on_change=_save_claims, args=args)
             st.selectbox("Scope", calc.SCOPES, index=calc.SCOPES.index(a["scope"]) if a["scope"] in calc.SCOPES else 0,
                          key=keys["scope"], on_change=_save_claims, args=args,
                          help="per_character: main and alts. per_server / unknown: main only.")

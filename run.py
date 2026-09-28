@@ -7,7 +7,8 @@
    The SQL is also autosaved every AUTOSAVE_SECONDS while the app runs.
 
 Standard library only, so it works with any Python 3.10+ before the venv exists.
-Usage: python run.py [extra streamlit args, e.g. --server.port 8502]
+Runs on port 8502 (DEFAULT_PORT) unless another --server.port is passed.
+Usage: python run.py [extra streamlit args, e.g. --server.port 8503]
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from aion import sqlsync  # noqa: E402
+
+DEFAULT_PORT = 8502
 
 VENV = ROOT / ".venv"
 VENV_PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -103,7 +106,10 @@ def main() -> int:
     for sig in stop_signals:
         signal.signal(sig, interrupt)
 
-    cmd = [str(VENV_PY), "-m", "streamlit", "run", str(ROOT / "streamlit_app.py"), *sys.argv[1:]]
+    args = sys.argv[1:]
+    if not any(a.startswith("--server.port") for a in args):
+        args = ["--server.port", str(DEFAULT_PORT), *args]
+    cmd = [str(VENV_PY), "-m", "streamlit", "run", str(ROOT / "streamlit_app.py"), *args]
     log("Starting Streamlit - press Ctrl+C to stop (data is saved on exit).")
     proc = subprocess.Popen(cmd, cwd=ROOT)
     last_mtime = sqlsync.DB_PATH.stat().st_mtime if sqlsync.DB_PATH.exists() else 0.0

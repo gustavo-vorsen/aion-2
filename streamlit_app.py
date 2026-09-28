@@ -38,7 +38,7 @@ with st.sidebar:
         st.progress(frac, text=f"{section} · {frac:.0%}")
         for pd in section_pages:
             f = progress.page_fraction(pd)
-            label = pd.title if f is None else f"{progress.mark(f >= 1)} {pd.title} · {f:.0%}"
+            label = pd.title if f is None else f"{progress.mark(f >= 1, pd.file)} {pd.title} · {f:.0%}"
             link = dict(label=label, icon=f":material/{pd.icon}:")
             tag = progress.page_tag(pd, ui.data())
             if not tag:
@@ -62,7 +62,7 @@ with st.sidebar:
 
 with st.container(horizontal=True, vertical_alignment="center"):
     st.title(page.title)
-    progress.fill_badge(progress.page_fraction(current))
+    progress.fill_badge(progress.page_fraction(current), key=current.file)
 progress.begin(current.file)
 page.run()
 progress.finish()

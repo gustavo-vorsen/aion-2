@@ -70,8 +70,8 @@ with st.container(border=True):
     sources_table("shop", "Purchases", {"kinah_cost_each": "Kinah"})
     st.markdown("**Craftable** (Substance Morph)")
     sources_table("morph", "Crafts", {"kinah_cost_each": "Kinah", "odyle_cost_each": "Odyle",
-                                      "pure_odyle_cost_each": "Pure Odyle",
-                                      "refined_odyle_cost_each": "Refined Pure Odyle"})
+                                      "pure_odyle_cost_each": "Fine Odyle",
+                                      "refined_odyle_cost_each": "Pure Odyle"})
 
 with st.container(border=True):
     st.subheader("Weekly Odyle per character")

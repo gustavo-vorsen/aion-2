@@ -10,12 +10,12 @@ st.caption(
     "costs its own Odyle."
 )
 
-COLUMNS = ["dungeon", "tier", "entry_item_level", "recommended_item_level", "duration_minutes",
+COLUMNS = ["dungeon", "tier", "entry_item_level", "recommended_item_level", "odyle_per_claim", "duration_minutes",
            "ruleset", "source_status", "notes"]
 # The mode is implied by the tab, so only the dungeon is shown; the full name (used by the plan and loops) follows it.
 db.execute("UPDATE activities SET name = dungeon || ' — ' || mode WHERE category = 'Expedition' AND dungeon <> '' "
            "AND mode <> '' AND name <> dungeon || ' — ' || mode")
-ui.claims_box("Expedition")
+ui.claims_box("Expedition", odyle_per_row=True)
 
 
 def mode_section(mode: str) -> None:
@@ -52,8 +52,12 @@ for f, t in counts.values():  # the page % covers every mode, not only the one o
     progress.track(f, t)
 
 
+def complete(*modes: str) -> bool:
+    return all(counts[m][0] >= counts[m][1] for m in modes)
+
+
 def done(*modes: str) -> str:
-    return progress.mark(all(counts[m][0] >= counts[m][1] for m in modes))
+    return progress.mark(complete(*modes), "expeditions:" + " · ".join(modes))
 
 
 # Same selectors as Nightmare: buttons for the mode, pills for the difficulty.
@@ -70,6 +74,8 @@ with st.container(border=True):
                               format_func={"Normal": f"{done('Conquest Normal')} :material/shield: Normal",
                                            "Hard": f"{done('Conquest Hard')} :material/local_fire_department: Hard"}.get)
         mode = f"Conquest {difficulty}"
+    if complete(mode):
+        progress.validate_toggle("expeditions:" + mode, f"{mode} validated")
     progress.pause_tracking()  # already counted above
     mode_section(mode)
     progress.resume_tracking()

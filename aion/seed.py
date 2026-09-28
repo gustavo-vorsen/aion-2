@@ -93,6 +93,11 @@ CURRENCIES = [
     ("gear_epic", "Epic gear", "gear", 0, 1, 0, None, 5.0),
     ("gear_rare", "Rare gear", "gear", 0, 1, 0, None, 2.0),
     ("gear_common", "Common gear", "gear", 0, 1, 0, None, 0.5),
+    ("gear_common_rare", "Common/Rare gear", "gear", 0, 1, 0, None, 1.0),
+    ("balaur_essence", "Balaur's Essence", "material", 0, 1, 0, None, 1.0),
+    ("thick_balaur", "Thick Balaur material", "material", 0, 1, 0, None, 1.0),
+    ("manastone_soulstone", "Manastone / Soulstone", "material", 0, 1, 0, None, 0.5),
+    ("wrathful_keys", "Wrathful keys (Mind / Will / Ego)", "material", 0, 1, 0, None, 3.0),
     ("scrolls_common", "Common scrolls", "material", 0, 1, 0, None, 0.2),
 ]
 
