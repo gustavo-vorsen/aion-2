@@ -27,9 +27,13 @@ CONTENT_CURRENCIES = [
 # activity name -> (fields to set, rewards per claim (replaces all; None = keep), notes)
 CONTENT_UPDATES = {
     "Shugo Festival": (
-        dict(scope="per_server", cadence="daily", attempts_per_reset=3, membership_bonus_attempts=0,
+        dict(scope="per_server", cadence="weekly", attempts_per_reset=7, membership_bonus_attempts=0,
              duration_minutes=5, ruleset="global_lst", source_status="provisional"),
-        {"abyss_points": 200, "centuryroot_tokens": 1},
+        {"centuryroot_tokens": 80.4, "soul_codex": 12, "artwork_scraps": 8, "enhancement_stones": 2000,
+         "abyss_points": 1600, "seed_of_detection": 0.7, "gear_epic": 0.6,
+         "odyle_material": 5.4, "fine_odyle": 1.8, "pure_odyle": 0.6, "radiant_odyle": 0.2,
+         "refining_stone": 4.4709389, "expert_refining_stone": 0.4470939, "artisan_refining_stone": 0.0447094,
+         "artisan_ultimate_refining_stone": 0.0372578},
         "Global: 3 keys/day free (secondary source, unverified); Global membership lists no extra keys. KR: 7/week "
         "free, 14 with membership, per server (S3). 160–240 AP per key at KR launch (doubled Dec 2025 and Apr 2026); "
         "AP not capped. Needs ≥100 contribution. https://www.iggm.com/news/aion-2-launch-scale-test-draws-73000-players-"
@@ -183,7 +187,6 @@ def migrate_content_v1(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR IGNORE INTO currencies (key, name, category, tradable, bound, shared, estimated_kinah_value, "
             "weight, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (*c, n + 1))
-    conn.execute("UPDATE currencies SET name = 'Nightmare Currency (Dream Shards)' WHERE key = 'nightmare_currency'")
 
     for name, (fields, rewards, notes) in CONTENT_UPDATES.items():
         row = conn.execute("SELECT id FROM activities WHERE name = ?", (name,)).fetchone()

@@ -26,11 +26,12 @@ DEFAULT_SETTINGS: dict = {
     "include_bound_kinah": True,
     "use_shop_odyle": False,
     "use_morph_odyle": False,
-    "server_odyle_pool_target": "Main",
     "odyle_regen_amount": 15.0,
     "odyle_regen_interval_hours": 3.0,
     "odyle_regen_amount_no_membership": 15.0,
     "odyle_regen_interval_hours_no_membership": 3.0,
+    "odyle_cap": 840.0,  # most Odyle stored, with membership (secondary source, Asian build)
+    "odyle_cap_no_membership": 560.0,
     "season_weeks": 12.0,
     "abyss_weekly_hours": 7.0,
     "abyss_membership_weekly_hours": 14.0,
@@ -63,8 +64,8 @@ CURRENCIES = [
     ("amplify_fragments", "Amplify Stone Fragments", "material", 0, 1, 0, None, 1.0),
     ("soul_crystals", "Soul Crystals", "material", 0, 1, 0, None, 1.0),
     ("stigma_shards", "Stigma Shards", "material", 0, 1, 0, None, 0.5),
-    ("manastones", "Manastones", "material", 1, 0, 0, None, 1.0),
-    ("nightmare_currency", "Nightmare Currency", "currency", 0, 1, 0, None, 0.2),
+    ("manastones", "Manastone/Soulstone Chest", "material", 1, 0, 0, None, 1.0),
+    ("nightmare_currency", "Phantasmal Fragments", "currency", 0, 1, 0, None, 0.2),
     ("trial_currency", "Trial Currency / Proof / Subjugation Mark", "currency", 0, 1, 0, None, 0.2),
     ("silver_medals", "Silver Medals", "currency", 0, 1, 0, None, 1.0),
     ("hidden_cube_keys", "Hidden Cube Keys", "currency", 0, 1, 1, None, 3.0),
@@ -77,6 +78,22 @@ CURRENCIES = [
     ("daevanion_points", "Daevanion Points", "progress", 0, 1, 0, None, 5.0),
     ("skill_points", "Skill Points", "progress", 0, 1, 0, None, 5.0),
     ("experience", "Experience", "progress", 0, 1, 0, None, 0.0),
+    ("soul_codex", "Soul Codex", "material", 0, 1, 0, None, 1.0),
+    ("artwork_scraps", "Artwork scraps", "material", 0, 1, 0, None, 0.5),
+    ("seed_of_detection", "Seed of Detection", "material", 0, 1, 0, None, 0.5),
+    ("odyle_material", "Odyle", "material", 0, 1, 0, None, 0.2),
+    ("fine_odyle", "Fine Odyle", "material", 0, 1, 0, None, 0.5),
+    ("pure_odyle", "Pure Odyle", "material", 0, 1, 0, None, 1.0),
+    ("radiant_odyle", "Radiant Odyle", "material", 0, 1, 0, None, 3.0),
+    ("refining_stone", "Refining Stone", "material", 0, 1, 0, None, 0.2),
+    ("expert_refining_stone", "Expert's Refining Stone", "material", 0, 1, 0, None, 0.5),
+    ("artisan_refining_stone", "Artisan's Refining Stone", "material", 0, 1, 0, None, 2.0),
+    ("artisan_ultimate_refining_stone", "Artisan's Ultimate Refining Stone", "material", 0, 1, 0, None, 5.0),
+    ("gear_unique", "Unique gear", "gear", 0, 1, 0, None, 10.0),
+    ("gear_epic", "Epic gear", "gear", 0, 1, 0, None, 5.0),
+    ("gear_rare", "Rare gear", "gear", 0, 1, 0, None, 2.0),
+    ("gear_common", "Common gear", "gear", 0, 1, 0, None, 0.5),
+    ("scrolls_common", "Common scrolls", "material", 0, 1, 0, None, 0.2),
 ]
 
 LEVELING_TEMPLATES = [
@@ -124,7 +141,7 @@ PH = "Placeholder reward values — replace with Global data."
 def _act(name, category, rewards=None, **kw):
     base = dict(
         name=name, category=category, enabled=1, main_default=1, alt_default=0,
-        scope="unknown_global", cadence="weekly", attempts_per_reset=None,
+        scope="unknown", cadence="weekly", attempts_per_reset=None,
         membership_bonus_attempts=0, charges_per_day=None, charge_cap=None,
         reward_claims_per_attempt=1, membership_extra_claims=0, weekly_claim_limit=None,
         duration_minutes=10, odyle_per_claim=0, kinah_cost=0, ap_cost=0, ticket_cost=0,
@@ -228,9 +245,9 @@ def _activities():
 
 ODYLE_SOURCES = [
     ("Odyle shop (per character)", "shop", "per_character", 4, 40),
-    ("Odyle shop (shared server)", "shop", "shared_server_pool", 16, 40),
+    ("Odyle shop (shared server)", "shop", "per_server", 16, 40),
     ("Substance Morph (per character)", "morph", "per_character", 4, 40),
-    ("Substance Morph (shared server)", "morph", "shared_server_pool", 16, 40),
+    ("Substance Morph (shared server)", "morph", "per_server", 16, 40),
 ]
 
 SOURCES = [
@@ -371,6 +388,15 @@ def seed(conn: sqlite3.Connection) -> None:
         )
 
 
+def normalize_scopes(conn: sqlite3.Connection) -> None:
+    """Only per_character / per_server / unknown exist: the account is bound to one server."""
+    for table in ("activities", "progression_items", "odyle_sources"):
+        conn.execute(f"UPDATE {table} SET scope = 'per_server' WHERE scope IN ('per_account', 'shared_server_pool')")
+    for table in ("activities", "progression_items"):
+        conn.execute(f"UPDATE {table} SET scope = 'unknown' "
+                     "WHERE scope IS NULL OR scope NOT IN ('per_character', 'per_server')")
+
+
 def ensure_defaults(conn: sqlite3.Connection) -> None:
     # New currencies reach existing databases too.
     n = conn.execute("SELECT COALESCE(MAX(sort_order), 0) FROM currencies").fetchone()[0]
@@ -397,6 +423,7 @@ def ensure_defaults(conn: sqlite3.Connection) -> None:
                      (key, label, color, desc))
     normalize_blocks(conn)
     assign_sessions(conn, only_missing=True)
+    normalize_scopes(conn)
     from aion.sessions import ensure_sessions
 
     ensure_sessions(conn)

@@ -4,7 +4,7 @@ from aion import progress, progression_ui
 
 st.caption(
     "One-time / permanent progression, separate from the weekly loop. Each system has an **own faction** and an "
-    "**enemy faction** section. Use **Scope = per_account** for progress shared by all characters."
+    "**enemy faction** section. Use **Scope = per_server** for progress shared by all characters."
 )
 
 all_items = progression_ui.items()

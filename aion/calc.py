@@ -12,8 +12,10 @@ import pandas as pd
 
 from aion import db
 
-SERVER_SCOPES = {"per_server", "shared_server_pool", "unknown_global"}
-SCOPES = ["per_character", "per_server", "per_account", "shared_server_pool", "unknown_global"]
+# The account is bound to one server, so per-server is also per-account. Unknown is treated like per-server
+# (never multiplied by character count).
+SERVER_SCOPES = {"per_server", "unknown"}
+SCOPES = ["per_character", "per_server", "unknown"]
 CADENCES = ["none", "daily", "weekly", "seasonal", "regenerating", "event", "opportunity"]
 SOURCE_STATUSES = ["confirmed", "provisional", "unknown"]
 AP_CAP_CATEGORIES = ["none", "pve", "pvp", "excluded"]
@@ -42,10 +44,22 @@ class Data:
     rulesets: pd.DataFrame
 
 
+TIER_PREFIX = "tier:"
+
+
 def load() -> Data:
     rewards_long = db.read_table("activity_rewards")
+    if not rewards_long.empty:  # expected value per claim = amount × draws × drop chance
+        rewards_long["amount"] = (rewards_long["amount"] * rewards_long["draws"].fillna(1.0)
+                                  * rewards_long["chance"].fillna(100.0) / 100.0)
     currencies = db.read_table("currencies", order="sort_order, key")
     activities = db.read_table("activities", order="sort_order, id")
+    if not rewards_long.empty:
+        # With a chosen tier only that tier's rows count; without one, only the untiered rows
+        # (tier rows have pool "tier:<label>").
+        tier = rewards_long["activity_id"].map(activities.set_index("id")["reward_tier"])
+        tiered = rewards_long["pool"].fillna("").str.startswith(TIER_PREFIX)
+        rewards_long = rewards_long[(tier.isna() & ~tiered) | (rewards_long["pool"] == TIER_PREFIX + tier.fillna(""))]
     wide = (
         rewards_long.pivot_table(index="activity_id", columns="currency_key", values="amount", aggfunc="sum")
         if not rewards_long.empty else pd.DataFrame()
@@ -108,6 +122,10 @@ def week_start(settings: dict, now: dt.datetime | None = None) -> dt.date:
 
 def weekly_max_attempts(act: pd.Series, membership: bool, settings: dict) -> float | None:
     """Maximum attempts per week. None = unbounded (limited by Odyle / plan)."""
+    sfx = "_membership" if membership else ""
+    hours = act.get(f"recharge_hours{sfx}")
+    if hours is not None and pd.notna(hours) and float(hours) > 0:
+        return _num(act.get(f"recharge_amount{sfx}")) * 168.0 / float(hours)
     base = act.get("attempts_per_reset")
     bonus = _num(act.get("membership_bonus_attempts")) if membership else 0.0
     cad = act.get("cadence")
@@ -178,17 +196,18 @@ def _odyle_sources(data: Data, respect_toggles: bool, include_shop: bool | None 
     s = data.settings
     shop = s["use_shop_odyle"] if include_shop is None else include_shop
     morph = s["use_morph_odyle"] if include_morph is None else include_morph
-    src = data.odyle_sources[data.odyle_sources["enabled"].astype(bool)].copy()
+    src = data.odyle_sources.copy()
     if respect_toggles:
         src = src[src["source_type"].map(lambda t: {"shop": shop, "morph": morph}.get(t, True))]
     return src
 
 
-def odyle_budget(data: Data, respect_toggles: bool = True) -> pd.DataFrame:
+def odyle_budget(data: Data, respect_toggles: bool = True, membership: bool | None = None) -> pd.DataFrame:
     """Weekly Odyle available per active character, by source type.
 
     With respect_toggles=False, purchasable/craftable amounts are shown even when the
     sidebar 'Use shop/morph Odyle' toggles are off (what each character *could* get).
+    membership overrides each character's own membership for natural regeneration.
     """
     s = data.settings
     chars = active_characters(data)
@@ -197,24 +216,17 @@ def odyle_budget(data: Data, respect_toggles: bool = True) -> pd.DataFrame:
         return out.assign(total=0.0)
     src = _odyle_sources(data, respect_toggles)
     for _, c in chars.iterrows():
-        mem = bool(c["membership"])
+        mem = bool(c["membership"]) if membership is None else membership
         out.loc[c["id"], "natural"] = odyle_natural_per_week(s, mem)
         for _, r in src[src["scope"] == "per_character"].iterrows():
-            if r["membership_required"] and not mem:
-                continue
             col = r["source_type"] if r["source_type"] in out.columns else "other"
             out.loc[c["id"], col] += _num(r["purchases"]) * _num(r["odyle_each"])
     pools = src[src["scope"] != "per_character"]
     for server, group in chars.groupby("server"):
         for _, r in pools.iterrows():
-            if r["membership_required"] and not s["account_membership"]:
-                continue
             amount = _num(r["purchases"]) * _num(r["odyle_each"])
             col = r["source_type"] if r["source_type"] in out.columns else "other"
-            if s.get("server_odyle_pool_target") == "Split evenly":
-                out.loc[group["id"], col] += amount / len(group)
-            else:
-                out.loc[_server_owner(group)["id"], col] += amount
+            out.loc[_server_owner(group)["id"], col] += amount  # per-server purchases go to the main
     out["total"] = out[["natural", "shop", "morph", "other"]].sum(axis=1)
     return out
 
@@ -229,7 +241,6 @@ def dungeon_gold_curves(data: Data, max_chars: int, include_shop: bool, include_
     s = data.settings
     src = _odyle_sources(data, True, include_shop, include_morph)
     mem = bool(s.get("account_membership", True))
-    src = src[~src["membership_required"].astype(bool) | mem]
     amount = src["purchases"].fillna(0).astype(float) * src["odyle_each"].fillna(0).astype(float)
     per_char = odyle_natural_per_week(s, mem) + amount[src["scope"] == "per_character"].sum()
     pool = amount[src["scope"] != "per_character"].sum()
@@ -246,18 +257,22 @@ def dungeon_gold_curves(data: Data, max_chars: int, include_shop: bool, include_
     return pd.DataFrame(rows)
 
 
-def odyle_purchase_kinah_cost(data: Data) -> float:
-    s = data.settings
-    src = data.odyle_sources[data.odyle_sources["enabled"].astype(bool)]
-    total = 0.0
-    n_chars = len(active_characters(data))
-    n_servers = active_characters(data)["server"].nunique()
-    for _, r in src.iterrows():
-        if not {"shop": s["use_shop_odyle"], "morph": s["use_morph_odyle"]}.get(r["source_type"], True):
-            continue
-        mult = n_chars if r["scope"] == "per_character" else n_servers
-        total += _num(r["purchases"]) * _num(r["kinah_cost_each"]) * mult
-    return total
+ODYLE_COST_COLUMNS = ["kinah_cost_each", "odyle_cost_each", "pure_odyle_cost_each", "refined_odyle_cost_each"]
+
+
+def odyle_source_costs(data: Data, source_type: str | None = None, respect_toggles: bool = False) -> pd.Series:
+    """Weekly cost of buying/crafting Odyle sources across all active characters, per material.
+
+    By default covers the full budget; respect_toggles=True keeps only what the plan uses
+    (sidebar 'Use shop/morph Odyle').
+    """
+    chars = active_characters(data)
+    src = _odyle_sources(data, respect_toggles)
+    if source_type is not None:
+        src = src[src["source_type"] == source_type]
+    mult = src["scope"].map(lambda sc: len(chars) if sc == "per_character" else chars["server"].nunique()).astype(float)
+    weekly = src["purchases"].fillna(0).astype(float) * mult
+    return pd.Series({c: (weekly * src[c].fillna(0).astype(float)).sum() for c in ODYLE_COST_COLUMNS})
 
 
 # ------------------------------------------------------------------ plan
@@ -282,14 +297,14 @@ def _setting_for(data: Data, char_id: int, act_id: int) -> dict:
 
 
 def is_enabled_for(act: pd.Series, char: pd.Series, setting: dict) -> bool:
-    """Loop membership comes only from the Main / Alt marks in the content tabs."""
-    return bool(act["main_default"] if char["is_main"] else act["alt_default"])
+    """Loop membership follows the scope: per_character → main and alts; per_server / unknown → main only."""
+    return act["scope"] == "per_character" or bool(char["is_main"])
 
 
 def eligible_activities(data: Data) -> pd.DataFrame:
     a = data.activities
     allowed = set(data.settings.get("allowed_rulesets") or [])
-    return a[a["enabled"].astype(bool) & (a["cadence"] != "none") & a["ruleset"].isin(allowed)]
+    return a[(a["cadence"] != "none") & a["ruleset"].isin(allowed)]
 
 
 def build_plan(data: Data, auto_odyle: bool = True) -> pd.DataFrame:
@@ -351,14 +366,11 @@ def build_plan(data: Data, auto_odyle: bool = True) -> pd.DataFrame:
                 else:
                     add_row(c, act, min(p, mx) if p is not None else mx, mx, "character", st_, mem)
         else:
-            # Server/account pools are never multiplied by character count.
-            if act["scope"] == "per_account":
-                groups = [("__account__", enabled)]
-            else:
-                by_server: dict[str, list] = {}
-                for c, st_ in enabled:
-                    by_server.setdefault(c["server"], []).append((c, st_))
-                groups = list(by_server.items())
+            # Server pools are never multiplied by character count.
+            by_server: dict[str, list] = {}
+            for c, st_ in enabled:
+                by_server.setdefault(c["server"], []).append((c, st_))
+            groups = list(by_server.items())
             mem = bool(s.get("account_membership", True))
             for _, members in groups:
                 members.sort(key=lambda cs: (not cs[0]["is_main"], -_num(cs[0]["item_level"]), cs[0]["sort_order"]))

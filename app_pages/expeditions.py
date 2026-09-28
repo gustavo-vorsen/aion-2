@@ -1,7 +1,6 @@
-import altair as alt
 import streamlit as st
 
-from aion import calc, ui
+from aion import db, progress, ui
 
 d = ui.data()
 CATS = ["Expedition"]
@@ -11,54 +10,66 @@ st.caption(
     "costs its own Odyle."
 )
 
-with st.container(border=True):
-    st.subheader("Dungeon parameters")
-    ui.activity_editor(CATS, key="dungeon_editor", columns=[
-        "name", "dungeon", "mode", "tier", "enabled", "main_default", "alt_default", "entry_item_level",
-        "recommended_item_level", "duration_minutes", "odyle_per_claim", "reward_claims_per_attempt",
-        "membership_extra_claims", "weekly_claim_limit", "attempts_per_reset", "scope", "cadence",
-        "ruleset", "source_status", "notes",
-    ], new_category="Expedition")
+COLUMNS = ["dungeon", "tier", "entry_item_level", "recommended_item_level", "duration_minutes",
+           "ruleset", "source_status", "notes"]
+# The mode is implied by the tab, so only the dungeon is shown; the full name (used by the plan and loops) follows it.
+db.execute("UPDATE activities SET name = dungeon || ' — ' || mode WHERE category = 'Expedition' AND dungeon <> '' "
+           "AND mode <> '' AND name <> dungeon || ' — ' || mode")
+ui.claims_box("Expedition")
 
-with st.container(border=True):
-    st.subheader("Rewards per claim")
-    ids = d.activities.loc[d.activities["category"].isin(CATS), "id"].astype(int).tolist()
-    if ids:
-        ui.reward_editor(ids, key="dungeon_rewards")
 
+def mode_section(mode: str) -> None:
+    """Parameters and rewards for one mode (Exploration, Conquest Normal, Conquest Hard)."""
+    key = mode.lower().replace(" ", "_")
+    with st.container(border=True):
+        st.subheader("Dungeon parameters")
+        ui.activity_editor(CATS, key=f"dungeon_editor_{key}", columns=COLUMNS, new_category="Expedition", mode=mode,
+                           shared_from_category=True)
+    with st.container(border=True):
+        st.subheader("Rewards per claim")
+        acts = d.activities[d.activities["category"].isin(CATS) & (d.activities["mode"] == mode)]
+        ids = acts["id"].astype(int).tolist()
+        if ids:
+            ui.wide_reward_editor(ids, key=f"dungeon_rewards_{key}", label="Dungeon",
+                                  row_names=acts.set_index("id")["dungeon"].fillna(acts.set_index("id")["name"]))
+        else:
+            st.caption("Add a dungeon above to fill its rewards.")
+
+
+MODES = ["Exploration", "Conquest Normal", "Conquest Hard"]
+
+
+def mode_counts(mode: str) -> tuple[float, float]:
+    """Filled / total cells of one mode's parameter and reward tables (whether shown or not)."""
+    acts = d.activities[d.activities["category"].isin(CATS) & (d.activities["mode"] == mode)]
+    p_f, p_t = ui.fill_counts(acts[COLUMNS])
+    r_f, r_t = ui.reward_grid_counts(acts["id"].astype(int).tolist())
+    return p_f + r_f, p_t + r_t
+
+
+counts = {m: mode_counts(m) for m in MODES}
+for f, t in counts.values():  # the page % covers every mode, not only the one on screen
+    progress.track(f, t)
+
+
+def done(*modes: str) -> str:
+    return progress.mark(all(counts[m][0] >= counts[m][1] for m in modes))
+
+
+# Same selectors as Nightmare: buttons for the mode, pills for the difficulty.
+kind = st.segmented_control("Expedition", ["Exploration", "Conquest"], default="Exploration", required=True,
+                            key="exp_kind", label_visibility="collapsed", width="stretch",
+                            format_func={"Exploration": f"{done('Exploration')} :material/explore: Exploration",
+                                         "Conquest": f"{done('Conquest Normal', 'Conquest Hard')} "
+                                                     ":material/swords: Conquest"}.get)
 with st.container(border=True):
-    st.subheader("Gold by number of characters")
-    st.caption("Weekly Kinah if every character spends all its Odyle in that dungeon. The shared server pool is "
-               "added once, so it is not multiplied by the number of characters.")
-    with st.container(horizontal=True, vertical_alignment="bottom"):
-        kinah = st.segmented_control("Kinah", ["Total", "Unbound", "Bound"], default="Total", key="gold_kinah")
-        modes = st.pills("Mode", ["Exploration", "Conquest"], default=["Exploration", "Conquest"],
-                         selection_mode="multi", key="gold_modes")
-        inc_shop = st.toggle("Include purchasable", value=bool(d.settings["use_shop_odyle"]), key="gold_shop")
-        inc_morph = st.toggle("Include craftable", value=bool(d.settings["use_morph_odyle"]), key="gold_morph")
-        max_n = st.number_input("Up to characters", 1, 20, max(8, len(calc.active_characters(d))), key="gold_n")
-    curves = calc.dungeon_gold_curves(d, int(max_n), inc_shop, inc_morph, (kinah or "Total").lower())
-    curves = curves[curves["mode"].isin(modes or [])] if not curves.empty else curves
-    if curves.empty:
-        st.caption("No data.")
-    else:
-        color, labels = ui.chart_options("gold_chart", ["dungeon", "mode"], "dungeon")
-        base = alt.Chart(curves).encode(
-            x=alt.X("characters:Q", title="Number of characters", axis=alt.Axis(tickMinStep=1, format="d")),
-            y=alt.Y("gold:Q", title=f"{kinah or 'Total'} Kinah / week", axis=alt.Axis(format=",.0f")),
-            color=alt.Color(f"{color}:N", title=None) if color else alt.value("#4C78A8"),
-            detail="dungeon:N",
-        )
-        line = base.mark_line(point=True).encode(
-            strokeDash=alt.StrokeDash("mode:N", title=None) if color != "mode" else alt.Undefined,
-            tooltip=["dungeon", "characters", alt.Tooltip("odyle:Q", format=",.0f", title="Odyle"),
-                     alt.Tooltip("gold:Q", format=",.0f", title="Kinah")],
-        )
-        chart = line
-        if labels != "None":
-            last = curves[curves["characters"] == curves["characters"].max()].copy()
-            last["_text"] = last["gold"].map(lambda v: f"{v:,.0f}") if labels == "Values" else last["dungeon"]
-            chart = line + alt.Chart(last).mark_text(align="left", dx=6, fontSize=10).encode(
-                x="characters:Q", y="gold:Q", text="_text:N",
-                color=alt.Color(f"{color}:N", title=None) if color else alt.value("#262730"))
-        st.altair_chart(chart.properties(height=380))
+    mode = "Exploration"
+    if kind == "Conquest":
+        difficulty = st.pills("Difficulty", ["Normal", "Hard"], default="Normal", required=True,
+                              key="exp_difficulty", label_visibility="collapsed",
+                              format_func={"Normal": f"{done('Conquest Normal')} :material/shield: Normal",
+                                           "Hard": f"{done('Conquest Hard')} :material/local_fire_department: Hard"}.get)
+        mode = f"Conquest {difficulty}"
+    progress.pause_tracking()  # already counted above
+    mode_section(mode)
+    progress.resume_tracking()

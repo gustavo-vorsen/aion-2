@@ -30,18 +30,23 @@ pages = {pd.file: st.Page(f"app_pages/{pd.file}.py", title=pd.title, icon=f":mat
 page = st.navigation(list(pages.values()), position="hidden")
 current = next(pd for f, pd in progress.PAGES.items() if pages[f].url_path == page.url_path)
 
-m = progress.marks()
 with st.sidebar:
-    overall = progress.overall_fraction(m)
+    overall = progress.overall_fraction()
     st.progress(overall, text=f"**Overall completion · {overall:.0%}**")
     for section, section_pages in progress.SECTIONS.items():
-        frac = progress.section_fraction(section, m)
+        frac = progress.section_fraction(section)
         st.progress(frac, text=f"{section} · {frac:.0%}")
         for pd in section_pages:
-            f = progress.page_fraction(pd, m)
-            label = pd.title + (f" · {sum(bool(m.get(f'{pd.file}:{t}')) for t in pd.tabs)}/{len(pd.tabs)}"
-                                if pd.tabs and 0 < f < 1 else "")
-            st.page_link(pages[pd.file], label=f"{label} {progress.mark(f >= 1)}", icon=f":material/{pd.icon}:")
+            f = progress.page_fraction(pd)
+            label = pd.title if f is None else f"{progress.mark(f >= 1)} {pd.title} · {f:.0%}"
+            link = dict(label=label, icon=f":material/{pd.icon}:")
+            tag = progress.page_tag(pd, ui.data())
+            if not tag:
+                st.page_link(pages[pd.file], **link)
+                continue
+            with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center", gap=None):
+                st.page_link(pages[pd.file], **link)
+                st.badge(tag, color="gray")
     st.divider()
     with st.expander("Global parameters", icon=":material/tune:"):
         ui.s_toggle("Membership (account)", "account_membership", where="sb")
@@ -57,6 +62,7 @@ with st.sidebar:
 
 with st.container(horizontal=True, vertical_alignment="center"):
     st.title(page.title)
-    if not current.tabs:  # pages with tabs get one toggle per tab instead
-        progress.done_toggle(current.file)
+    progress.fill_badge(progress.page_fraction(current))
+progress.begin(current.file)
 page.run()
+progress.finish()

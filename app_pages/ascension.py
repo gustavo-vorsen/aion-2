@@ -6,9 +6,20 @@ st.caption(
     "Character-specific weekly attempts (reference: 3/week). Later level-50 Trial systems are not part "
     "of the Global level-45 launch loop."
 )
+ui.entries_box("Ascension Trial", "entries")
 ui.category_page(
     ["Ascension Trial"], key="ascension",
-    columns=["name", "enabled", "main_default", "alt_default", "scope", "cadence", "attempts_per_reset",
-             "duration_minutes", "entry_item_level", "ruleset", "source_status", "notes"],
-    reward_keys=["manastones", "stigma_shards", "trial_currency", "enhancement_stones", "kinah_bound"],
+    show_params=False,
+    show_rewards=False,
+)
+
+BRACKETS = [f"Score ≥ {n:,}" for n in (10, 100, 200, 500, 1000, 1500, 2000, 2500, *range(3000, 14001, 1000))]
+TRIALS = ["Chamber of the Dead"]  # one tab per trial; other trials may have different tables
+ui.tier_reward_editor(
+    "Ascension Trial", {t: BRACKETS for t in TRIALS}, key="ascension_tiers", tier_label="Score",
+    columns=[("Silentium", "silentium", ""), ("Ariel fragments", "ariel_shards", ""),
+             ("Manastone/Soulstone Chest", "manastones", ""), ("Stigma Shards", "stigma_shards", ""),
+             ("Enhancement Stones", "enhancement_stones", "")],
+    picker=False, group_names=("Trial",), group_icons=("emoji_events",),
+    help_text="Rewards by final score (reference values). Add trials with Edit trials; add score rows in the table.",
 )

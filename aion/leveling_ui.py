@@ -32,6 +32,7 @@ def leveling_defaults(role: str) -> None:
         ui.editor(
             tmpl[["label", "start_level", "end_level", "hours", "critical"]], f"tmpl_{role}",
             [{"id": int(i)} for i in tmpl["id"]], on_update=upd,
+            on_delete=lambda rk: db.delete("leveling_templates", rk),
             disabled=["label", "start_level", "end_level"],
             column_config={
                 "label": ui.cc.TextColumn("Block"),

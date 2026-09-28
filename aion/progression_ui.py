@@ -47,7 +47,7 @@ SYSTEMS: list[System] = [
            "Arcana cards from Transcendence (repeatable). Biggest Item Level jump per card."),
 ]
 FACTIONS = [("own", "Own faction", "shield"), ("enemy", "Enemy faction", "swords")]
-SCOPES = ["per_character", "per_account", "per_server"]
+SCOPES = calc.SCOPES
 
 
 def items() -> pd.DataFrame:
@@ -58,6 +58,7 @@ def rewards_wide() -> pd.DataFrame:
     r = db.read_table("progression_rewards")
     if r.empty:
         return pd.DataFrame()
+    r["amount"] = r["amount"] * r["draws"].fillna(1.0) * r["chance"].fillna(100.0) / 100.0  # expected value
     return r.pivot_table(index="item_id", columns="currency_key", values="amount", aggfunc="sum").fillna(0.0)
 
 
@@ -79,13 +80,13 @@ def item_gs(df: pd.DataFrame, wide: pd.DataFrame, rates: pd.Series) -> pd.DataFr
         "Count": df["count"].fillna(1).astype(float).values,
         "From": how,
     })
-    out["GS total"] = out["GS per completion"] * out["Count"] * df["enabled"].astype(bool).values
+    out["GS total"] = out["GS per completion"] * out["Count"]
     return out[["Item", "GS per completion", "Count", "GS total", "From"]]
 
 
 def totals(df: pd.DataFrame, wide: pd.DataFrame, rates: pd.Series) -> dict[str, float]:
-    """Totals for one completion of every enabled row (reward × count)."""
-    on = df[df["enabled"].astype(bool)]
+    """Totals for one completion of every row (reward × count)."""
+    on = df
     if on.empty:
         return {"hours": 0.0, "gs": 0.0, "daevanion_points": 0.0, "count": 0.0, "capacity": 0.0}
     w = wide.reindex(index=on["id"]).fillna(0.0)
@@ -166,7 +167,7 @@ def system_tab(sys: System, all_items: pd.DataFrame, wide: pd.DataFrame) -> None
                 st.metric("Daevanion points", ui.fmt(t["daevanion_points"]), border=True)
             st.markdown("**Parameters**")
             cols = ["id", "name", "region", "level_req", "count", *(["capacity"] if sys.key == "daevanion" else []),
-                    "minutes_each", "scope", "enabled", "main_default", "alt_default", "ruleset", "source_status", "notes"]
+                    "minutes_each", "scope", "ruleset", "source_status", "notes"]
             ui.table_editor(
                 "progression_items", df[cols],
                 key=f"prog_{sys.key}_{f}", defaults={"system": sys.key, "faction": f},
@@ -178,10 +179,7 @@ def system_tab(sys: System, all_items: pd.DataFrame, wide: pd.DataFrame) -> None
                     "capacity": ui.cc.NumberColumn("Board points", min_value=0, help="Points this board can take."),
                     "minutes_each": ui.cc.NumberColumn("Minutes each", min_value=0, format="%.1f"),
                     "scope": ui.cc.SelectboxColumn("Scope", options=SCOPES,
-                                                   help="per_account = shared progress, done once for all characters."),
-                    "enabled": ui.cc.CheckboxColumn("On"),
-                    "main_default": ui.cc.CheckboxColumn("Main"),
-                    "alt_default": ui.cc.CheckboxColumn("Alt"),
+                                                   help="per_server = shared progress, done once for all characters."),
                     "ruleset": ui.cc.SelectboxColumn("Ruleset", options=[r[0] for r in seed.RULESETS]),
                     "source_status": ui.cc.SelectboxColumn("Source status", options=calc.SOURCE_STATUSES),
                     "notes": ui.cc.TextColumn("Notes", width="large"),
@@ -194,7 +192,7 @@ def system_tab(sys: System, all_items: pd.DataFrame, wide: pd.DataFrame) -> None
             ui.reward_editor(
                 df["id"].astype(int).tolist(), key=f"prog_rw_{sys.key}_{f}", currency_keys=list(sys.reward_keys),
                 table="progression_rewards", fk="item_id", row_names=df.set_index("id")["name"],
-                rewards=wide, label="Item",
+                label="Item",
             )
             st.markdown("**Item Level (GS) given**")
             ui.show(item_gs(df, wide, rates), hide_index=True, column_config={

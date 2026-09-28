@@ -36,7 +36,7 @@ with tab_calc:
                 "Kinah value / hour": ui.cc.NumberColumn(format="%,.0f"),
             })
             ui.bar(weekly.fillna(0), "activity", "Kinah value / hour", horizontal=True, fmt_=",.0f", height=420)
-        st.caption(f"Odyle purchases cost **{calc.odyle_purchase_kinah_cost(d):,.0f}** Kinah/week; activity entry costs total **{p['kinah_cost'].sum():,.0f}** Kinah/week.")
+        st.caption(f"Odyle purchases cost **{calc.odyle_source_costs(d, respect_toggles=True)["kinah_cost_each"]:,.0f}** Kinah/week; activity entry costs total **{p['kinah_cost'].sum():,.0f}** Kinah/week.")
 
 with tab_all:
     progress.tab_done("economy", "all")

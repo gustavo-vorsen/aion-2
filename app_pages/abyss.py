@@ -25,7 +25,7 @@ with st.container(border=True):
 
 ui.category_page(
     ["Abyss"], key="abyss",
-    columns=["name", "enabled", "main_default", "alt_default", "scope", "cadence", "attempts_per_reset",
+    columns=["name", "scope", "cadence", "attempts_per_reset",
              "membership_bonus_attempts", "duration_minutes", "consumes_abyss_time", "ap_cap_category",
              "ruleset", "source_status", "notes"],
     reward_keys=["abyss_points", "kinah_unbound", "potential_stones", "abyss_potential_stones", "silver_medals",

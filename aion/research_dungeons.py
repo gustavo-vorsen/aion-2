@@ -168,7 +168,7 @@ def migrate_dungeons_v1(conn: sqlite3.Connection) -> None:
 
     # Odyle (KR values; Global membership only lists a higher cap "TBA" and 2 claims per cube).
     for k, v in {"odyle_regen_amount": 15.0, "odyle_regen_interval_hours": 3.0,
-                 "odyle_regen_amount_no_membership": 10.0, "odyle_regen_interval_hours_no_membership": 3.0}.items():
+                 "odyle_regen_amount_no_membership": 15.0, "odyle_regen_interval_hours_no_membership": 3.0}.items():
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v)))
     note_shop = ("KR S3: 21 per server per week at 100,000 Kinah each (pre-S3: 4/character + 12/server). On Global the "
                  "Wind Breeze merchant is membership-only. https://www.inven.co.kr/board/aion2/6388/150348")
@@ -176,11 +176,13 @@ def migrate_dungeons_v1(conn: sqlite3.Connection) -> None:
                   "25 Odyle + 5 Pure Odyle + 1 Refined Pure Odyle → 40). https://www.gameple.co.kr/news/articleView.html?idxno=214580")
     conn.execute("UPDATE odyle_sources SET purchases = 21, odyle_each = 40, kinah_cost_each = 100000, membership_required = 1, "
                  "enabled = 1, notes = ? WHERE name = 'Odyle shop (shared server)'", (note_shop,))
-    conn.execute("UPDATE odyle_sources SET enabled = 0, notes = ? WHERE name = 'Odyle shop (per character)'",
+    conn.execute("UPDATE odyle_sources SET kinah_cost_each = 100000, notes = ? WHERE name = 'Odyle shop (per character)'",
                  ("Removed in KR S3 (pre-S3: 4 per character). " + note_shop,))
-    conn.execute("UPDATE odyle_sources SET purchases = 20, odyle_each = 40, kinah_cost_each = 50000, enabled = 1, "
+    conn.execute("UPDATE odyle_sources SET purchases = 20, odyle_each = 40, kinah_cost_each = 50000, odyle_cost_each = 25, "
+                 "pure_odyle_cost_each = 5, refined_odyle_cost_each = 1, enabled = 1, "
                  "notes = ? WHERE name = 'Substance Morph (shared server)'", (note_morph,))
-    conn.execute("UPDATE odyle_sources SET enabled = 0, notes = ? WHERE name = 'Substance Morph (per character)'",
+    conn.execute("UPDATE odyle_sources SET kinah_cost_each = 50000, odyle_cost_each = 25, pure_odyle_cost_each = 5, "
+                 "refined_odyle_cost_each = 1, notes = ? WHERE name = 'Substance Morph (per character)'",
                  ("Removed in KR S3. " + note_morph,))
     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_dungeons_v1', 'true')")
 

@@ -1,6 +1,7 @@
 """Shared Streamlit widgets: DB-backed editors, settings inputs, status badges, charts."""
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import re
 import uuid
@@ -10,7 +11,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from aion import calc, db, seed
+from aion import calc, db, seed, progress
 
 cc = st.column_config
 
@@ -121,9 +122,43 @@ def _apply_edits(key: str, row_keys: list[dict], on_update: Callable, on_insert:
     invalidate()
 
 
+# Columns that may legitimately stay blank (blank = no limit / unknown / optional): not counted as unfilled.
+OPTIONAL_COLUMNS = {
+    "notes", "Notes", "ruleset", "source_status", "pool", "Pool", "dungeon", "mode", "tier", "description", "color",
+    "attempts_per_reset", "charges_per_day", "charge_cap", "weekly_claim_limit", "membership_bonus_attempts",
+    "membership_extra_claims", "kinah_cost", "ap_cost", "ticket_cost",
+    "Planned runs", "capacity", "level_req", "region", "estimated_kinah_value", "sort_order",
+}
+
+
+def fill_counts(df: pd.DataFrame, skip: set[str] | frozenset = frozenset()) -> tuple[float, float]:
+    """(filled, total) required cells of a table."""
+    cols = [c for c in df.columns if c not in OPTIONAL_COLUMNS and c not in skip]
+    if df.empty or not cols:
+        return 0.0, 0.0
+    block = df[cols]
+    filled = block.notna() & block.astype(str).ne("")
+    return float(filled.values.sum()), float(block.size)
+
+
+def track_fill(df: pd.DataFrame, skip: set[str] | frozenset = frozenset()) -> None:
+    """Report a table's filled / total required cells to the page's fill percentage."""
+    progress.track(*fill_counts(df, skip))
+
+
+def reward_grid_counts(activity_ids: list[int]) -> tuple[float, float]:
+    """(filled, total) cells of the wide rewards grid for these activities (as wide_reward_editor shows it)."""
+    raw = db.read_table("activity_rewards")
+    raw = raw[raw["activity_id"].isin(activity_ids) & (raw["pool"].fillna("") == "")] if not raw.empty else raw
+    keys = raw["currency_key"].unique() if not raw.empty else []
+    have = set(zip(raw["activity_id"], raw["currency_key"])) if not raw.empty else set()
+    return float(len(have)), float(len(activity_ids) * len(keys))
+
+
 def editor(df: pd.DataFrame, key: str, row_keys: list[dict], on_update: Callable,
            on_insert: Callable | None = None, on_delete: Callable | None = None, **kw) -> pd.DataFrame:
-    """st.data_editor that writes every change straight to SQLite."""
+    """st.data_editor that writes every change straight to SQLite (and counts toward the page's fill %)."""
+    track_fill(df, {c for c in (kw.get("disabled") or []) if isinstance(c, str)})
     num_rows = "dynamic" if (on_insert and on_delete) else "add" if on_insert else "delete" if on_delete else "fixed"
     wkey = f"{key}__v{st.session_state.get(f'_ver_{key}', 0)}"
     data = df.reset_index(drop=True)
@@ -174,13 +209,23 @@ def ruleset_badges() -> None:
             st.badge(label, color=color)
 
 
+TIER_OPTIONS = ["1★", "2★", "3★", "4★", "5★", "Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5"]
+MODE_OPTIONS = ["Exploration", "Conquest Normal", "Conquest Hard"]
+
+
+def _options(base: list[str], col: str) -> list[str]:
+    """Fixed choices plus any value already used, so existing rows stay valid."""
+    used = [v for v in data().activities[col].dropna().unique() if v not in base]
+    return [*base, *sorted(used)]
+
+
 def activity_columns() -> dict:
     return {
+        "tier": cc.SelectboxColumn("Tier", options=_options(TIER_OPTIONS, "tier")),
+        "dungeon": cc.TextColumn("Dungeon", pinned=True),
+        "mode": cc.SelectboxColumn("Mode", options=_options(MODE_OPTIONS, "mode")),
         "name": cc.TextColumn("Activity", pinned=True, width="medium"),
         "category": cc.TextColumn("Category"),
-        "enabled": cc.CheckboxColumn("On"),
-        "main_default": cc.CheckboxColumn("Main"),
-        "alt_default": cc.CheckboxColumn("Alt"),
         "scope": cc.SelectboxColumn("Scope", options=calc.SCOPES, required=True),
         "cadence": cc.SelectboxColumn("Cadence", options=calc.CADENCES, required=True),
         "attempts_per_reset": cc.NumberColumn("Attempts / reset", help="Blank = unbounded (Odyle-limited)."),
@@ -211,65 +256,528 @@ def activity_columns() -> dict:
 
 
 BASE_ACTIVITY_COLS = [
-    "name", "enabled", "main_default", "alt_default", "scope", "cadence", "attempts_per_reset",
+    "name", "scope", "cadence", "attempts_per_reset",
     "membership_bonus_attempts", "duration_minutes", "ruleset", "source_status", "notes",
 ]
 
 
+SHARED_COLUMNS = ("odyle_per_claim", "reward_claims_per_attempt", "membership_extra_claims", "scope", "cadence")
+
+
+def _shared_defaults(rows: pd.DataFrame) -> dict:
+    return {} if rows.empty else {c: rows.iloc[0][c] for c in SHARED_COLUMNS if pd.notna(rows.iloc[0][c])}
+
+
 def activity_editor(categories: list[str], key: str, columns: list[str] | None = None,
-                    new_category: str | None = None) -> None:
+                    new_category: str | None = None, cadences: list[str] | None = None,
+                    mode: str | None = None, shared_from_category: bool = False) -> None:
+    """cadences: only show activities with these cadences (new rows get the first one).
+    mode: only show activities with this mode (e.g. an Expedition tab; new rows get it).
+    shared_from_category: new rows copy the category's shared settings (Odyle per claim, claims, scope, cadence)."""
     acts = data().activities
     df = acts[acts["category"].isin(categories)]
+    if cadences:
+        df = df[df["cadence"].isin(cadences)]
+    if mode:
+        df = df[df["mode"] == mode]
     cols = ["id", *(columns or BASE_ACTIVITY_COLS)]
     if len(categories) > 1 and "category" not in cols:
         cols.insert(2, "category")
     table_editor(
         "activities", df[cols], key=key,
-        defaults={"category": new_category or categories[0], "sort_order": int(acts["sort_order"].max() or 0) + 1},
+        defaults={"category": new_category or categories[0], "sort_order": int(acts["sort_order"].max() or 0) + 1,
+                  **({"cadence": cadences[0]} if cadences else {}), **({"mode": mode} if mode else {}),
+                  **(_shared_defaults(acts[acts["category"].isin(categories)]) if shared_from_category else {})},
         column_config=activity_columns(),
     )
 
 
 def reward_editor(activity_ids: list[int], key: str, currency_keys: list[str] | None = None, *,
                   table: str = "activity_rewards", fk: str = "activity_id",
-                  row_names: pd.Series | None = None, rewards: pd.DataFrame | None = None,
-                  label: str = "Activity") -> None:
-    """Rewards table: rows = activities (or progression items), columns = only this content's reward types.
+                  row_names: pd.Series | None = None, label: str = "Activity", only_listed: bool = False,
+                  pool_prefix: str | None = None, show_pool: bool = True) -> None:
+    """Rewards table, one row per reward line, like the in-game reward list:
+    [label] | Pool | Reward | Amount | Times | Chance % | Average (= amount × times × chance, what the plan counts).
 
-    Columns = the page's reward types + any currency these rows already give;
-    other currencies can be added with the picker.
+    The same reward may appear on several rows (e.g. 60 at 50 %, 80 at 30 %). currency_keys: this content's reward
+    types (offered first). only_listed: show and offer just those. pool_prefix: show only the lines whose pool
+    starts with it (e.g. "Highlights · "), without the prefix. Removing a row removes that reward line.
     """
     d = data()
-    rewards = d.rewards if rewards is None else rewards
     row_names = d.activities.set_index("id")["name"] if row_names is None else row_names
-    used = rewards.reindex(index=activity_ids).fillna(0.0)
-    used = [k for k in used.columns if (used[k] != 0).any()]
-    base = list(dict.fromkeys([*(currency_keys or []), *used]))
-    all_names = dict(zip(d.currencies["key"], d.currencies["name"]))
-    extra = st.multiselect(
-        "Add reward columns", [k for k in d.currencies["key"] if k not in base], format_func=all_names.get,
-        key=f"{key}_extra_cols", placeholder="Other currencies…",
-    )
-    keys = [k for k in d.currencies["key"] if k in set(base) | set(extra)]  # keep registry order
-    names = {k: all_names[k] for k in keys}
-    wide = rewards.reindex(index=activity_ids, columns=keys).fillna(0.0)
-    wide.columns = [names[k] for k in wide.columns]
-    wide.insert(0, label, row_names.reindex(activity_ids).values)
-    key_by_name = {v: k for k, v in names.items()}
+    names = dict(zip(d.currencies["key"], d.currencies["name"]))
+    order = {k: i for i, k in enumerate(d.currencies["key"])}
+    page_keys = [k for k in currency_keys or [] if k in names]
+    rank = {k: i for i, k in enumerate(page_keys)}
+    options = page_keys if only_listed else page_keys + [k for k in d.currencies["key"] if k not in rank]
+    key_by_name = {names[k]: k for k in options}
+    ids = [int(i) for i in activity_ids]
+    multi = len(ids) > 1
+    id_by_name = {row_names.get(i, str(i)): i for i in ids}
+
+    raw = db.read_table(table)
+    if not raw.empty:
+        raw = raw[raw[fk].isin(ids) & raw["currency_key"].isin(options)]
+        if pool_prefix is not None:
+            raw = raw[raw["pool"].fillna("").str.startswith(pool_prefix)]
+            raw = raw.assign(pool=raw["pool"].str[len(pool_prefix):])
+        raw = raw.assign(
+            _row=raw[fk].map({i: n for n, i in enumerate(ids)}),
+            _pool=raw.groupby("pool", dropna=False)["id"].transform("min"),  # pools in the order they were entered
+            _cur=raw["currency_key"].map(lambda k: rank.get(k, len(rank) + order.get(k, 0))),
+        ).sort_values(["_row", "_pool", "_cur", "amount"])
+    df = pd.DataFrame({
+        label: [row_names.get(i, str(i)) for i in raw[fk]] if not raw.empty else [],
+        "Pool": raw["pool"].fillna("").values if not raw.empty else [],
+        "Reward": [names.get(k, k) for k in raw["currency_key"]] if not raw.empty else [],
+        "Amount": raw["amount"].astype(float).values if not raw.empty else [],
+        "Times": raw["draws"].fillna(1.0).astype(float).values if not raw.empty else [],
+        "Chance %": raw["chance"].fillna(100.0).astype(float).values if not raw.empty else [],
+    })
+    df = df.astype({label: "object", "Pool": "object", "Reward": "object",
+                    "Amount": float, "Times": float, "Chance %": float})  # empty tables need explicit types
+    df["Average"] = df["Amount"].fillna(0) * df["Times"].fillna(1) * df["Chance %"].fillna(100) / 100
+    if not multi:
+        df = df.drop(columns=[label])
+    if not show_pool:
+        df = df.drop(columns=["Pool"])
+    row_keys = [{"id": int(i)} for i in raw["id"]] if not raw.empty else []
+    fields = {"Pool": "pool", "Amount": "amount", "Times": "draws", "Chance %": "chance"}
+    defaults = {"pool": "", "amount": 0.0, "draws": 1.0, "chance": 100.0}
+
+    def values_from(changes: dict) -> dict:
+        vals = {col: (defaults[col] if changes[c] is None else changes[c]) for c, col in fields.items() if c in changes}
+        if pool_prefix is not None and "pool" in vals:
+            vals["pool"] = pool_prefix + vals["pool"]
+        if changes.get("Reward") in key_by_name:
+            vals["currency_key"] = key_by_name[changes["Reward"]]
+        if changes.get(label) in id_by_name:
+            vals[fk] = id_by_name[changes[label]]
+        return vals
+
+    def ins(new: dict) -> None:
+        vals = {**defaults, **({"pool": pool_prefix} if pool_prefix else {}), **values_from(new)}
+        if not multi:
+            vals[fk] = ids[0]
+        if "currency_key" not in vals or fk not in vals:
+            st.toast("Pick a reward" + (f" and an {label.lower()}" if multi else "") + " to add a row.",
+                     icon=":material/info:")
+            return
+        db.insert(table, vals)
+
+    config = {
+        "Pool": cc.TextColumn("Pool", help="Optional, e.g. the in-game reward pool."),
+        "Reward": cc.SelectboxColumn("Reward", options=[names[k] for k in options], required=True, width="medium"),
+        "Amount": cc.NumberColumn("Amount", format="%,.2f", min_value=0),
+        "Times": cc.NumberColumn("Times", format="%g", min_value=0, help="Times this line is rolled. Blank = 1."),
+        "Chance %": cc.NumberColumn("Chance %", format="%.4g %%", min_value=0, max_value=100,
+                                    help="Chance per draw. Blank = 100 %."),
+        "Average": cc.NumberColumn("Average", format="%,.2f", help="Amount × times × chance: what the plan counts."),
+    }
+    if multi:
+        config[label] = cc.SelectboxColumn(label, options=list(id_by_name), required=True, pinned=True)
+    editor(df, key, row_keys, on_update=lambda rk, ch: db.update(table, rk, values_from(ch)), on_insert=ins,
+           on_delete=lambda rk: db.delete(table, rk), column_config=config, disabled=["Average"])
+
+
+def _save_tier_choice(aid: int, wk: str) -> None:
+    db.update("activities", {"id": aid}, {"reward_tier": st.session_state[wk]})
+    invalidate()
+
+
+TierGroups = list[str] | dict[str, "TierGroups"]
+
+
+def _tier_leaves(groups: TierGroups, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], list[str]]]:
+    """(tab path, default rows) for every table in a possibly nested {tab: rows | {tab: ...}} spec."""
+    if isinstance(groups, dict):
+        return [leaf for name, sub in groups.items() for leaf in _tier_leaves(sub, (*path, name))]
+    return [(path, groups)]
+
+
+def _tier_rows_key(key: str, path: tuple[str, ...]) -> str:
+    return f"tier_rows__{key}__" + "__".join(path)
+
+
+def _tier_pool(path: tuple[str, ...], row: str) -> str:
+    return calc.TIER_PREFIX + " · ".join((*path, row))
+
+
+def _tier_groups_key(key: str) -> str:
+    return f"tier_groups__{key}"
+
+
+def tier_groups(key: str, default: TierGroups, settings: dict | None = None) -> TierGroups:
+    """The page's current tab structure: the saved one (after adds / renames / removals) or the default."""
+    return (settings if settings is not None else data().settings).get(_tier_groups_key(key), default)
+
+
+def _tier_node(root: TierGroups, path: tuple[str, ...]) -> TierGroups:
+    for name in path:
+        root = root[name]
+    return root
+
+
+def _pick_key(key: str, parent: tuple[str, ...]) -> str:
+    return f"{key}__pick__" + "__".join(parent)
+
+
+def _tier_add(key: str, default: TierGroups, parent: tuple[str, ...], wk: str, what: str) -> None:
+    name = (st.session_state.get(wk) or "").strip()
+    root = copy.deepcopy(tier_groups(key, default, db.get_settings()))
+    node = _tier_node(root, parent)
+    if not name or name in node:
+        st.toast(f"Type a new {what} name that isn't used yet.", icon=":material/info:")
+        return
+    node[name] = copy.deepcopy(next(iter(node.values()))) if node else []  # same shape as its siblings
+    db.set_setting(_tier_groups_key(key), root)
+    st.session_state[_pick_key(key, parent)] = name
+    st.session_state[wk] = ""
+    invalidate()
+
+
+def _tier_move_rows(aid: int, key: str, old: tuple[str, ...], new: tuple[str, ...] | None, subtree: TierGroups) -> None:
+    """Rename (new) or delete (new=None) everything stored under a tab path: reward rows, row lists, plan tier."""
+    old_prefix = calc.TIER_PREFIX + " · ".join(old) + " · "
+    if new is None:
+        db.execute("DELETE FROM activity_rewards WHERE activity_id = ? AND substr(pool, 1, ?) = ?",
+                   [aid, len(old_prefix), old_prefix])
+    else:
+        new_prefix = calc.TIER_PREFIX + " · ".join(new) + " · "
+        db.execute("UPDATE activity_rewards SET pool = ? || substr(pool, ?) WHERE activity_id = ? AND substr(pool, 1, ?) = ?",
+                   [new_prefix, len(old_prefix) + 1, aid, len(old_prefix), old_prefix])
+    settings = db.get_settings()
+    for leaf, _ in _tier_leaves(subtree, old):
+        rows_key = _tier_rows_key(key, leaf)
+        if rows_key in settings and new is not None:
+            db.set_setting(_tier_rows_key(key, (*new, *leaf[len(old):])), settings[rows_key])
+        db.execute("DELETE FROM settings WHERE key = ?", [rows_key])
+    tier = db.read_table("activities", where="id = ?", params=[aid]).iloc[0]["reward_tier"]
+    old_label = " · ".join(old) + " · "
+    if isinstance(tier, str) and tier.startswith(old_label):
+        db.update("activities", {"id": aid},
+                  {"reward_tier": None if new is None else " · ".join(new) + " · " + tier[len(old_label):]})
+
+
+def _tier_rename(key: str, default: TierGroups, aid: int, path: tuple[str, ...], wk: str, what: str) -> None:
+    name = (st.session_state.get(wk) or "").strip()
+    root = copy.deepcopy(tier_groups(key, default, db.get_settings()))
+    parent = _tier_node(root, path[:-1])
+    if not name or name in parent:
+        st.toast(f"Type a new {what} name that isn't used yet.", icon=":material/info:")
+        return
+    subtree = parent[path[-1]]
+    items = [(name if k == path[-1] else k, v) for k, v in parent.items()]
+    parent.clear()
+    parent.update(items)
+    db.set_setting(_tier_groups_key(key), root)
+    _tier_move_rows(aid, key, path, (*path[:-1], name), subtree)
+    st.session_state[_pick_key(key, path[:-1])] = name
+    invalidate()
+
+
+def _tier_remove(key: str, default: TierGroups, aid: int, path: tuple[str, ...], ok_key: str) -> None:
+    if not st.session_state.get(ok_key):
+        st.toast("Tick the confirmation first.", icon=":material/info:")
+        return
+    root = copy.deepcopy(tier_groups(key, default, db.get_settings()))
+    parent = _tier_node(root, path[:-1])
+    if len(parent) <= 1:
+        st.toast("Can't remove the last one.", icon=":material/info:")
+        return
+    subtree = parent.pop(path[-1])
+    db.set_setting(_tier_groups_key(key), root)
+    _tier_move_rows(aid, key, path, None, subtree)
+    st.session_state.pop(_pick_key(key, path[:-1]), None)
+    invalidate()
+
+
+def _auto_tier(aid: int, key: str, groups: TierGroups, columns: list[tuple[str, str, str]]) -> None:
+    """Plan tier = the last row (in page order) with a value in a counted column."""
+    settings = db.get_settings()
+    groups = tier_groups(key, groups, settings)
+    raw = db.read_table("activity_rewards", where="activity_id = ?", params=[aid])
+    filled = set(raw.loc[raw["amount"].notna(), "pool"]) if not raw.empty else set()
+    best = None
+    for path, default in _tier_leaves(groups):
+        for row in settings.get(_tier_rows_key(key, path), default):
+            if any(_tier_pool(path, row) + sfx in filled for _, _, sfx in columns if not sfx):
+                best = " · ".join((*path, row))
+    db.update("activities", {"id": aid}, {"reward_tier": best})
+
+
+def tier_completion(category: str, key: str, groups: TierGroups, columns: list[tuple[str, str, str]]
+                    ) -> dict[tuple[str, ...], bool]:
+    """Per table (tab path): True when every row has a value in every column."""
+    d = data()
+    acts = d.activities[d.activities["category"] == category]
+    if acts.empty:
+        return {}
+    raw = db.read_table("activity_rewards", where="activity_id = ?", params=[int(acts.iloc[0]["id"])])
+    have = set(zip(raw["pool"], raw["currency_key"])) if not raw.empty else set()
+    out = {}
+    for path, default in _tier_leaves(tier_groups(key, groups, d.settings)):
+        rows = d.settings.get(_tier_rows_key(key, path), default)
+        out[path] = bool(rows) and all((_tier_pool(path, r) + sfx, ck) in have for r in rows for _, ck, sfx in columns)
+    return out
+
+
+def tier_reward_editor(category: str, tiers: TierGroups, columns: list[tuple[str, str, str]], key: str,
+                       tier_label: str = "Tier", help_text: str = "", auto_tier: bool = False,
+                       picker: bool = True, group_names: tuple[str, ...] = ("Group", "Tier"),
+                       group_icons: tuple[str, ...] = ("layers", "stairs")) -> None:
+    """Rewards that depend on a tier (score bracket, boss level): one row per tier, one column per reward.
+
+    tiers: a list of rows, or {tab: rows | {tab: ...}} for (nested) tabs, e.g. Nightmare layer > tier > level.
+    Rows can be added, renamed and removed (kept per table in settings). columns: (label, currency key, pool
+    suffix); a suffix such as "|first" stores one-time values the plan never counts. The plan counts one row: the
+    one picked in the selector, or with auto_tier the last row that has a counted value. picker=False: reference
+    values only (no selector; the plan counts none of these rows). group_names / group_icons name the tab levels
+    (e.g. Layer, Tier); each level has an Edit menu to add, rename or remove its tabs.
+    """
+    d = data()
+    acts = d.activities[d.activities["category"] == category]
+    if acts.empty:
+        return
+    a = acts.iloc[0]
+    aid = int(a["id"])
+    default_tiers = tiers
+    tiers = tier_groups(key, default_tiers, d.settings)
+    leaves = _tier_leaves(tiers)
+    rows_of = {path: list(d.settings.get(_tier_rows_key(key, path), default)) for path, default in leaves}
+    raw = db.read_table("activity_rewards", where="activity_id = ?", params=[aid])
+    cell = {(r["pool"], r["currency_key"]): r["amount"] for _, r in raw.iterrows()}
+
+    def after_change() -> None:
+        if auto_tier:
+            _auto_tier(aid, key, tiers, columns)
+
+    def set_cell(pool: str, ck: str, value) -> None:
+        db.execute("DELETE FROM activity_rewards WHERE activity_id = ? AND pool = ? AND currency_key = ?",
+                   [aid, pool, ck])
+        if value not in (None, ""):
+            db.insert("activity_rewards", {"activity_id": aid, "pool": pool, "currency_key": ck,
+                                           "amount": float(value), "draws": 1.0, "chance": 100.0})
+
+    def table(path: tuple[str, ...], tab_key: str) -> None:
+        rows = rows_of[path]
+        df = pd.DataFrame({tier_label: pd.Series(rows, dtype="object")})
+        for label, ck, sfx in columns:
+            df[label] = pd.Series([cell.get((_tier_pool(path, r) + sfx, ck)) for r in rows], dtype=float)
+
+        def save_rows(new_rows: list[str]) -> None:
+            db.set_setting(_tier_rows_key(key, path), new_rows)
+
+        def upd(rk: dict, changes: dict) -> None:
+            row = rk["row"]
+            renamed = changes.get(tier_label)
+            if renamed and renamed != row and renamed not in rows:
+                for _, ck, sfx in columns:
+                    db.execute("UPDATE activity_rewards SET pool = ? WHERE activity_id = ? AND pool = ?",
+                               [_tier_pool(path, renamed) + sfx, aid, _tier_pool(path, row) + sfx])
+                save_rows([renamed if r == row else r for r in rows])
+                row = renamed
+            for label, ck, sfx in columns:
+                if label in changes:
+                    set_cell(_tier_pool(path, row) + sfx, ck, changes[label])
+            after_change()
+
+        def ins(new: dict) -> None:
+            row = (new.get(tier_label) or "").strip() or f"Row {len(rows) + 1}"
+            if row not in rows:
+                rows.append(row)
+                save_rows(rows)
+            for label, ck, sfx in columns:
+                if new.get(label) is not None:
+                    set_cell(_tier_pool(path, row) + sfx, ck, new[label])
+            after_change()
+
+        def delete(rk: dict) -> None:
+            for _, ck, sfx in columns:
+                set_cell(_tier_pool(path, rk["row"]) + sfx, ck, None)
+            rows.remove(rk["row"])
+            save_rows(rows)
+            after_change()
+
+        editor(df, tab_key, [{"row": r} for r in rows], on_update=upd, on_insert=ins, on_delete=delete,
+               column_config={tier_label: cc.TextColumn(tier_label, pinned=True, required=True),
+                              **{c[0]: cc.NumberColumn(c[0], format="%,.0f", min_value=0) for c in columns}})
+
+    def filled(path: tuple[str, ...]) -> str:
+        rows = rows_of.get(path, [])
+        parts = []
+        for label, ck, sfx in columns:
+            n = sum(cell.get((_tier_pool(path, r) + sfx, ck)) is not None for r in rows)
+            parts.append(f"{label} **{n}/{len(rows)}**")
+        return "Filled: " + " · ".join(parts)
+
+    done = tier_completion(category, key, tiers, columns)
+
+    def complete(prefix: tuple[str, ...]) -> bool:
+        return all(ok for p, ok in done.items() if p[:len(prefix)] == prefix)
+
+    def tabs(groups: TierGroups, path: tuple[str, ...] = ()) -> None:
+        """Top level = buttons, second level = pills (only the chosen table is shown), deeper = tabs.
+        Each button carries a green tick when all its tables are filled, an exclamation mark otherwise."""
+        if not isinstance(groups, dict):
+            if path:
+                st.caption(filled(path))
+            table(path, f"{key}__" + "__".join(path))
+            return
+        names = list(groups)
+        depth = len(path)
+        if depth >= 2:
+            for tab, name in zip(st.tabs([f"{progress.mark(complete((*path, n)))} {n}" for n in names]), names):
+                with tab:
+                    tabs(groups[name], (*path, name))
+            return
+        what = group_names[min(depth, len(group_names) - 1)]
+        icon = f":material/{group_icons[min(depth, len(group_icons) - 1)]}:"
+        pk = _pick_key(key, path)
+        if st.session_state.get(pk) not in names:
+            st.session_state[pk] = names[0]  # selection lives in session state (set here or by the Edit menu)
+        with st.container(horizontal=True, vertical_alignment="bottom"):
+            if depth == 0:  # top level: buttons
+                choice = st.segmented_control(
+                    what, names, required=True, key=pk, label_visibility="collapsed", width="stretch",
+                    format_func=lambda n: f"{progress.mark(complete((*path, n)))} {icon} {n}") or names[0]
+            else:  # second level: pills
+                choice = st.pills(
+                    what, names, required=True, key=pk, label_visibility="collapsed",
+                    format_func=lambda n: f"{progress.mark(complete((*path, n)))} {icon} {n}") or names[0]
+            group_menu(path, choice, what)
+        if depth == 0:
+            with st.container(border=True):
+                st.markdown(f"##### {icon} {choice}")
+                tabs(groups[choice], (*path, choice))
+        else:
+            tabs(groups[choice], (*path, choice))
+
+    def group_menu(parent: tuple[str, ...], choice: str, what: str) -> None:
+        """Add / rename / remove tabs at this level."""
+        base = f"{key}__edit__" + "__".join(parent)
+        with st.popover(f"Edit {what.lower()}s", icon=":material/edit:", width="content"):
+            st.text_input(f"New {what.lower()} name", key=f"{base}__new", placeholder=f"e.g. {what} {len(_tier_node(tiers, parent)) + 1}")
+            st.button(f"Add {what.lower()}", icon=":material/add:", key=f"{base}__add", on_click=_tier_add,
+                      args=(key, default_tiers, parent, f"{base}__new", what.lower()))
+            st.text_input(f"Rename {choice}", value=choice, key=f"{base}__ren__{choice}")
+            st.button("Rename", icon=":material/edit_note:", key=f"{base}__rename", on_click=_tier_rename,
+                      args=(key, default_tiers, aid, (*parent, choice), f"{base}__ren__{choice}", what.lower()))
+            st.checkbox(f"Yes, remove {choice} and all its values", key=f"{base}__ok__{choice}")
+            st.button(f"Remove {choice}", icon=":material/delete:", key=f"{base}__remove", on_click=_tier_remove,
+                      args=(key, default_tiers, aid, (*parent, choice), f"{base}__ok__{choice}"))
+
+    with st.container(border=True):
+        st.subheader("Rewards per claim")
+        current = a.get("reward_tier")
+        if picker and not auto_tier:
+            choices = [" · ".join((*p, r)) for p, rs in rows_of.items() for r in rs]
+            wk = f"{key}__tier"
+            st.selectbox(f"{tier_label} used in the plan", choices,
+                         index=choices.index(current) if current in choices else None,
+                         placeholder=f"Pick the {tier_label.lower()} you usually reach", key=wk,
+                         on_change=_save_tier_choice, args=(aid, wk))
+            flat = raw[raw["pool"].fillna("") == ""] if not raw.empty else raw
+            if current not in choices and not flat.empty:
+                names = dict(zip(d.currencies["key"], d.currencies["name"]))
+                st.caption("Until you pick one, the plan uses the earlier flat values: " + ", ".join(
+                    f"{names.get(r['currency_key'], r['currency_key'])} {r['amount']:,.0f}"
+                    for _, r in flat.iterrows()) + ".")
+        if help_text:
+            st.caption(help_text)
+        if auto_tier:
+            st.caption(f"Plan uses: **{current}**." if current else "Plan uses: nothing yet (no repeat value filled).")
+        tabs(tiers)
+
+
+def wide_reward_editor(activity_ids: list[int], key: str, currency_keys: list[str] | None = None,
+                       row_names: pd.Series | None = None, label: str = "Activity") -> None:
+    """Rewards grid like the Nightmare table: one row per activity, one column per reward (amount per claim).
+
+    Columns = the page's reward types + any reward these rows already give + ones added with the picker.
+    Cells hold plain per-claim amounts (one draw, 100 %); clearing a cell removes that reward.
+    """
+    d = data()
+    names = dict(zip(d.currencies["key"], d.currencies["name"]))
+    row_names = d.activities.set_index("id")["name"] if row_names is None else row_names
+    raw = db.read_table("activity_rewards")
+    raw = raw[raw["activity_id"].isin(activity_ids) & (raw["pool"].fillna("") == "")] if not raw.empty else raw
+    used = list(dict.fromkeys(raw.sort_values("id")["currency_key"])) if not raw.empty else []
+    base = list(dict.fromkeys([k for k in [*(currency_keys or []), *used] if k in names]))
+    extra = st.multiselect("Add reward columns", [k for k in names if k not in base], format_func=names.get,
+                           key=f"{key}_extra_cols", placeholder="Other rewards…")
+    keys = [*base, *extra]
+    value = {}
+    if not raw.empty:
+        raw = raw.assign(v=raw["amount"] * raw["draws"].fillna(1.0) * raw["chance"].fillna(100.0) / 100.0)
+        value = raw.groupby(["activity_id", "currency_key"])["v"].sum().to_dict()
+    df = pd.DataFrame({label: pd.Series([row_names.get(i, str(i)) for i in activity_ids], dtype="object")})
+    for k in keys:
+        df[names[k]] = pd.Series([value.get((i, k)) for i in activity_ids], dtype=float)
+    key_by_name = {names[k]: k for k in keys}
 
     def upd(rk: dict, changes: dict) -> None:
         for col, val in changes.items():
             ck = key_by_name.get(col)
             if ck is None:
                 continue
-            if val in (None, 0, 0.0):
-                db.delete(table, {fk: rk["id"], "currency_key": ck})
-            else:
-                db.upsert(table, {fk: rk["id"], "currency_key": ck}, {"amount": float(val)})
+            db.execute("DELETE FROM activity_rewards WHERE activity_id = ? AND currency_key = ? AND "
+                       "COALESCE(pool, '') = ''", [rk["id"], ck])
+            if val not in (None, ""):
+                db.insert("activity_rewards", {"activity_id": rk["id"], "currency_key": ck, "pool": "",
+                                               "amount": float(val), "draws": 1.0, "chance": 100.0})
 
-    config = {n: cc.NumberColumn(n, format="%,.2f", min_value=0) for n in names.values()}
-    config[label] = cc.TextColumn(label, disabled=True, pinned=True)
-    editor(wide, key, [{"id": int(i)} for i in activity_ids], on_update=upd, column_config=config, disabled=[label])
+    editor(df, key, [{"id": int(i)} for i in activity_ids], on_update=upd, disabled=[label],
+           column_config={label: cc.TextColumn(label, pinned=True),
+                          **{names[k]: cc.NumberColumn(names[k], format="%,.2f", min_value=0) for k in keys}})
+
+
+def _pools_key(key: str) -> str:
+    return f"reward_pools__{key}"
+
+
+def _pool_add(key: str, wk: str) -> None:
+    name = (st.session_state.get(wk) or "").strip()
+    pools = list(db.get_settings().get(_pools_key(key), []))
+    if not name or name in pools:
+        st.toast("Type a new pool name that isn't used yet.", icon=":material/info:")
+        return
+    db.set_setting(_pools_key(key), [*pools, name])
+    st.session_state[wk] = ""
+    invalidate()
+
+
+def _pool_remove(key: str, activity_ids: list[int], prefix: str, pool: str, ok_key: str) -> None:
+    if not st.session_state.get(ok_key):
+        st.toast("Tick the confirmation first.", icon=":material/info:")
+        return
+    db.execute(f"DELETE FROM activity_rewards WHERE pool = ? AND activity_id IN ({','.join('?' * len(activity_ids))})",
+               [prefix + pool, *activity_ids])
+    db.set_setting(_pools_key(key), [p for p in db.get_settings().get(_pools_key(key), []) if p != pool])
+    invalidate()
+
+
+def pooled_reward_editor(activity_ids: list[int], key: str, prefix: str, currency_keys: list[str] | None = None) -> None:
+    """One tab per reward pool (pool names stored as "<prefix><pool>"), each with its own rewards table."""
+    raw = db.read_table("activity_rewards")
+    raw = raw[raw["activity_id"].isin(activity_ids) & raw["pool"].fillna("").str.startswith(prefix)] if not raw.empty else raw
+    seen = list(dict.fromkeys(raw.sort_values("id")["pool"].str[len(prefix):])) if not raw.empty else []
+    pools = list(dict.fromkeys([*seen, *data().settings.get(_pools_key(key), [])]))
+    with st.popover("Edit pools", icon=":material/edit:"):
+        st.text_input("New pool name", key=f"{key}__new", placeholder=f"e.g. Reward Pool {len(pools) + 1}")
+        st.button("Add pool", icon=":material/add:", key=f"{key}__add", on_click=_pool_add, args=(key, f"{key}__new"))
+        if pools:
+            gone = st.selectbox("Pool to remove", pools, key=f"{key}__rm")
+            st.checkbox(f"Yes, remove {gone} and its rewards", key=f"{key}__ok")
+            st.button("Remove pool", icon=":material/delete:", key=f"{key}__remove", on_click=_pool_remove,
+                      args=(key, activity_ids, prefix, gone, f"{key}__ok"))
+    if not pools:
+        st.caption("No pools yet. Add one with Edit pools.")
+        return
+    for tab, pool in zip(st.tabs(pools), pools):
+        with tab:
+            reward_editor(activity_ids, key=f"{key}__{pool}", currency_keys=currency_keys, pool_prefix=prefix + pool,
+                          show_pool=False)
 
 
 def character_activity_editor(char: pd.Series, categories: list[str] | None, key: str, only_in_loop: bool = False) -> None:
@@ -279,7 +787,7 @@ def character_activity_editor(char: pd.Series, categories: list[str] | None, key
     if categories:
         acts = acts[acts["category"].isin(categories)]
     if only_in_loop:
-        acts = acts[acts["main_default" if char["is_main"] else "alt_default"].astype(bool)]
+        acts = acts[[calc.is_enabled_for(a, char, {}) for _, a in acts.iterrows()]]
     p = plan()
     rows = []
     for _, a in acts.iterrows():
@@ -310,12 +818,17 @@ def character_activity_editor(char: pd.Series, categories: list[str] | None, key
         vals = {col_map[k]: v for k, v in changes.items() if k in col_map}
         db.upsert("character_activity", rk, vals)
 
+    def remove(rk: dict) -> None:
+        # Loop membership follows the scope, so removing a line skips it for this character (0 planned runs).
+        db.upsert("character_activity", rk, {"planned_runs": 0})
+
     editor(
         df, key, [{"character_id": int(char["id"]), "activity_id": int(i)} for i in acts["id"]], on_update=upd,
+        on_delete=remove,
         disabled=["Activity", "Category", "Scope", "Enabled", "Max / week", "Runs in plan", "Hours / week", "Odyle / week", "Allocation", "Status"],
         column_config={
             "Activity": cc.TextColumn(pinned=True),
-            "Enabled": cc.CheckboxColumn("In loop", help="Set by the Main / Alt marks in the content tabs."),
+            "Enabled": cc.CheckboxColumn("In loop", help="per_character: main and alts. per_server / unknown: main only."),
             "Planned runs": cc.NumberColumn(help="Blank = max allowed, or auto Odyle allocation.", min_value=0),
             "Max / week": cc.NumberColumn(format="%.1f", help="Blank = Odyle-limited"),
             "Runs in plan": cc.NumberColumn(format="%.1f"),
@@ -477,16 +990,135 @@ def bar(df: pd.DataFrame, x: str, y: str, color: str | None = None, horizontal: 
     st.altair_chart(chart.properties(height=height))
 
 
-def category_page(categories: list[str], key: str, columns: list[str] | None = None,
-                  reward_keys: list[str] | None = None) -> None:
-    """Standard content page: parameters table + rewards table (like Expedition)."""
-    d = data()
+ENTRY_FIELDS = {  # widget key -> activities column
+    "amount": "recharge_amount", "cap": "charge_cap",
+    "amount_m": "recharge_amount_membership", "cap_m": "charge_cap_membership",
+}
+PERIOD_HOURS = {"day": 24.0, "week": 168.0}
+
+
+def _save_entries(aid: int, keys: dict[str, str], per_key: str) -> None:
+    hours = PERIOD_HOURS[st.session_state[per_key]]
+    values = {ENTRY_FIELDS[k]: st.session_state[wk] for k, wk in keys.items()}
+    db.update("activities", {"id": aid}, {**values, "recharge_hours": hours, "recharge_hours_membership": hours})
+    invalidate()
+
+
+def _save_claims(category: str, keys: dict[str, str]) -> None:
+    v = {k: st.session_state[wk] for k, wk in keys.items()}
+    free = float(v["claims"] or 0)
+    db.execute("UPDATE activities SET odyle_per_claim = ?, reward_claims_per_attempt = ?, membership_extra_claims = ?, "
+               "scope = ? WHERE category = ?",
+               [float(v["odyle"] or 0), free, max(float(v["claims_m"] or 0) - free, 0.0), v["scope"], category])
+    invalidate()
+
+
+def claims_box(category: str) -> None:
+    """Settings shared by every row of an Odyle-claim page (Expedition, Transcendence), laid out like entries_box:
+    a no-membership row and a membership row (grayed computed value at the end), then the shared fields."""
+    acts = data().activities
+    acts = acts[acts["category"] == category]
+    if acts.empty:
+        return
+    a = acts.iloc[0]
+    keys = {k: f"claims__{category}__{k}" for k in ("odyle", "claims", "claims_m", "scope")}
+    args = (category, keys)
+    odyle = calc._num(a["odyle_per_claim"])
+    claims = calc._num(a["reward_claims_per_attempt"], 1.0)
+    rows = (("claims", "no membership", claims), ("claims_m", "membership", claims + calc._num(a["membership_extra_claims"])))
     with st.container(border=True):
-        st.subheader("Parameters")
-        st.caption("Every value is editable. Changes save immediately and recalculate the plan.")
-        activity_editor(categories, key=f"{key}_acts", columns=columns)
+        st.subheader("Claims & cost (Odyle)")
+        for k, who, n in rows:
+            with st.container(horizontal=True):
+                st.number_input(f"Claims per run ({who})", value=n, min_value=0.0, step=1.0, key=keys[k],
+                                on_change=_save_claims, args=args,
+                                help=None if k == "claims" else "Each extra claim costs its own Odyle.")
+                st.text_input(f"Odyle per run ({who})", value=f"{n * odyle:,.0f}", disabled=True,
+                              key=f"claims__{category}__cost_{k}__{n * odyle}")  # text: no +/- steppers
+        with st.container(horizontal=True):
+            st.number_input("Odyle per claim", value=odyle, min_value=0.0, step=5.0, key=keys["odyle"],
+                            on_change=_save_claims, args=args)
+            st.selectbox("Scope", calc.SCOPES, index=calc.SCOPES.index(a["scope"]) if a["scope"] in calc.SCOPES else 0,
+                         key=keys["scope"], on_change=_save_claims, args=args,
+                         help="per_character: main and alts. per_server / unknown: main only.")
+        progress.track(4, 4)
+
+
+def _save_field(aid: int, col: str, wk: str) -> None:
+    db.update("activities", {"id": aid}, {col: st.session_state[wk]})
+    invalidate()
+
+
+def entries_box(category: str, unit: str = "entries", gs: bool = False) -> None:
+    """The page's parameters: recharge per day or week and cap, with and without membership (per week computed,
+    grayed), plus scope, minutes per entry and optionally the required GS."""
+    d = data()
+    acts = d.activities[d.activities["category"] == category]
+    if acts.empty:
+        return
+    a = acts.iloc[0]
+    aid = int(a["id"])
+    keys = {k: f"entries__{aid}__{k}" for k in ENTRY_FIELDS}
+    per_key = f"entries__{aid}__per"
+    args = (aid, keys, per_key)
+    per = "week" if calc._num(a.get("recharge_hours")) >= 168 else "day"
+    with st.container(border=True):
+        st.subheader(f"Recharge & cap ({unit})")
+        st.segmented_control("Recharge per", ["day", "week"], default=per, key=per_key, required=True,
+                             on_change=_save_entries, args=args)
+        for sfx, who in (("", "no membership"), ("_m", "membership")):
+            amount, cap = a.get(ENTRY_FIELDS["amount" + sfx]), a.get(ENTRY_FIELDS["cap" + sfx])
+            weekly = calc.weekly_max_attempts(a, bool(sfx), d.settings)
+            with st.container(horizontal=True):
+                st.number_input(f"Recharge rate ({who})", value=None if pd.isna(amount) else float(amount),
+                                min_value=0.0, step=1.0, key=keys["amount" + sfx], on_change=_save_entries, args=args)
+                st.number_input(f"Cap ({who})", value=None if pd.isna(cap) else float(cap), min_value=0.0,
+                                step=1.0, key=keys["cap" + sfx], on_change=_save_entries, args=args,
+                                help="Most you can store.")
+                st.text_input(f"Per week ({who})", value=f"{weekly or 0:,.1f}".removesuffix(".0"), disabled=True,
+                              key=f"entries__{aid}__week{sfx}__{weekly}")  # text: no +/- steppers
+        progress.track(sum(pd.notna(a.get(c)) for c in ENTRY_FIELDS.values()) + pd.notna(a.get("duration_minutes")),
+                       len(ENTRY_FIELDS) + 1)
+        with st.container(horizontal=True):
+            sk, mk, gk = (f"entries__{aid}__{c}" for c in ("scope", "minutes", "gs"))
+            st.selectbox("Scope", calc.SCOPES, index=calc.SCOPES.index(a["scope"]) if a["scope"] in calc.SCOPES else 0,
+                         key=sk, on_change=_save_field, args=(aid, "scope", sk),
+                         help="per_character: main and alts. per_server / unknown: main only.")
+            st.number_input("Minutes per entry", value=calc._num(a["duration_minutes"]), min_value=0.0, step=1.0,
+                            key=mk, on_change=_save_field, args=(aid, "duration_minutes", mk))
+            if gs:
+                v = a.get("entry_item_level")
+                st.number_input("Required GS", value=None if pd.isna(v) else float(v), min_value=0.0, step=10.0,
+                                key=gk, on_change=_save_field, args=(aid, "entry_item_level", gk))
+
+
+def category_page(categories: list[str], key: str, columns: list[str] | None = None,
+                  reward_keys: list[str] | None = None, cadences: list[str] | None = None,
+                  show_rewards: bool = True, show_params: bool = True, wide_rewards: bool = False,
+                  shared_from_category: bool = False) -> None:
+    """Standard content page: parameters table + rewards table (like Expedition).
+
+    show_params: False on pages whose few parameters live in `entries_box` instead.
+
+    cadences: only show activities with these cadences (e.g. the daily or weekly part of a category).
+    show_rewards: False for content whose rewards can't be known in advance.
+    """
+    d = data()
+    if show_params:
+        with st.container(border=True):
+            st.subheader("Parameters")
+            st.caption("Every value is editable. Changes save immediately and recalculate the plan.")
+            activity_editor(categories, key=f"{key}_acts", columns=columns, cadences=cadences,
+                            shared_from_category=shared_from_category)
+    if not show_rewards:
+        return
     with st.container(border=True):
         st.subheader("Rewards per claim")
-        ids = d.activities.loc[d.activities["category"].isin(categories), "id"].astype(int).tolist()
-        if ids:
+        acts = d.activities[d.activities["category"].isin(categories)]
+        if cadences:
+            acts = acts[acts["cadence"].isin(cadences)]
+        ids = acts["id"].astype(int).tolist()
+        if ids and wide_rewards:
+            wide_reward_editor(ids, key=f"{key}_rewards", currency_keys=reward_keys)
+        elif ids:
             reward_editor(ids, key=f"{key}_rewards", currency_keys=reward_keys)

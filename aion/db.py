@@ -114,7 +114,7 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
             ("count", "REAL DEFAULT 1"),  # how many of these exist (e.g. 12 strongholds)
             ("capacity", "REAL"),  # Daevanion boards: points the board can take
             ("minutes_each", "REAL DEFAULT 0"),
-            ("scope", "TEXT DEFAULT 'per_character'"),  # per_character | per_account | per_server
+            ("scope", "TEXT DEFAULT 'per_character'"),  # per_character | per_server | unknown
             ("enabled", "BOOLEAN DEFAULT 1"),
             ("main_default", "BOOLEAN DEFAULT 1"),
             ("alt_default", "BOOLEAN DEFAULT 1"),
@@ -127,11 +127,15 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
     ),
     "progression_rewards": (
         [
+            ("id", "INTEGER PRIMARY KEY"),
             ("item_id", "INTEGER REFERENCES progression_items(id) ON DELETE CASCADE"),
+            ("pool", "TEXT DEFAULT ''"),  # optional label, e.g. "Basic · Pool 4"
             ("currency_key", "TEXT REFERENCES currencies(key) ON DELETE CASCADE"),
             ("amount", "REAL DEFAULT 0"),  # per completion of one item
+            ("draws", "REAL DEFAULT 1"),  # times this line is rolled
+            ("chance", "REAL DEFAULT 100"),  # % per draw; value used = amount × draws × chance
         ],
-        ["PRIMARY KEY (item_id, currency_key)"],
+        [],
     ),
     "currencies": (
         [
@@ -160,12 +164,19 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
             ("enabled", "BOOLEAN DEFAULT 1"),
             ("main_default", "BOOLEAN DEFAULT 1"),
             ("alt_default", "BOOLEAN DEFAULT 0"),
-            ("scope", "TEXT DEFAULT 'unknown_global'"),
+            ("scope", "TEXT DEFAULT 'unknown'"),
             ("cadence", "TEXT DEFAULT 'weekly'"),
             ("attempts_per_reset", "REAL"),
             ("membership_bonus_attempts", "REAL DEFAULT 0"),
             ("charges_per_day", "REAL"),
             ("charge_cap", "REAL"),
+            ("charge_cap_membership", "REAL"),  # max stored with membership
+            ("reward_tier", "TEXT"),  # tiered rewards: the tier / score bracket / level the plan counts
+            # Recharge: `amount` every `hours` (set = overrides cadence-based weekly attempts), per membership state.
+            ("recharge_amount", "REAL"),
+            ("recharge_hours", "REAL"),
+            ("recharge_amount_membership", "REAL"),
+            ("recharge_hours_membership", "REAL"),
             ("reward_claims_per_attempt", "REAL DEFAULT 1"),
             ("membership_extra_claims", "REAL DEFAULT 0"),
             ("weekly_claim_limit", "REAL"),
@@ -191,11 +202,15 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
     ),
     "activity_rewards": (
         [
+            ("id", "INTEGER PRIMARY KEY"),
             ("activity_id", "INTEGER REFERENCES activities(id) ON DELETE CASCADE"),
+            ("pool", "TEXT DEFAULT ''"),  # optional label, e.g. "Basic · Pool 4"
             ("currency_key", "TEXT REFERENCES currencies(key) ON DELETE CASCADE"),
-            ("amount", "REAL DEFAULT 0"),
+            ("amount", "REAL DEFAULT 0"),  # per claim
+            ("draws", "REAL DEFAULT 1"),  # times this line is rolled
+            ("chance", "REAL DEFAULT 100"),  # % per draw; value used = amount × draws × chance
         ],
-        ["PRIMARY KEY (activity_id, currency_key)"],
+        [],
     ),
     "character_activity": (
         [
@@ -208,15 +223,27 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
         ],
         ["PRIMARY KEY (character_id, activity_id)"],
     ),
+    "fill": (
+        [
+            ("key", "TEXT PRIMARY KEY"),  # page file, or "page:tab"
+            ("filled", "REAL DEFAULT 0"),
+            ("total", "REAL DEFAULT 0"),  # 0 = nothing to fill on this page / tab
+        ],
+        [],
+    ),
     "odyle_sources": (
         [
             ("id", "INTEGER PRIMARY KEY"),
             ("name", "TEXT"),
             ("source_type", "TEXT DEFAULT 'shop'"),  # shop | morph | other
-            ("scope", "TEXT DEFAULT 'per_character'"),  # per_character | shared_server_pool
+            ("scope", "TEXT DEFAULT 'per_character'"),  # per_character | per_server
             ("purchases", "REAL DEFAULT 0"),
             ("odyle_each", "REAL DEFAULT 40"),
             ("kinah_cost_each", "REAL DEFAULT 0"),
+            # Crafting materials consumed per craft (Substance Morph).
+            ("odyle_cost_each", "REAL DEFAULT 0"),
+            ("pure_odyle_cost_each", "REAL DEFAULT 0"),
+            ("refined_odyle_cost_each", "REAL DEFAULT 0"),
             ("enabled", "BOOLEAN DEFAULT 1"),
             ("membership_required", "BOOLEAN DEFAULT 0"),
             ("ruleset", "TEXT DEFAULT 'kr_tw_reference'"),
@@ -275,11 +302,26 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _rebuild_reward_tables(conn: sqlite3.Connection) -> None:
+    """Old reward tables had one row per (owner, currency); rebuild them with a row id so a reward can repeat."""
+    for table in ("activity_rewards", "progression_rewards"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not cols or "id" in cols:
+            continue
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        new_cols, constraints = SCHEMA[table]
+        conn.execute(f"CREATE TABLE {table} ({', '.join([f'{c} {d}' for c, d in new_cols] + constraints)})")
+        keep = [c for c, _ in new_cols if c in cols]
+        conn.execute(f"INSERT INTO {table} ({', '.join(keep)}) SELECT {', '.join(keep)} FROM {table}_old")
+        conn.execute(f"DROP TABLE {table}_old")
+
+
 def init_db() -> None:
     """Create missing tables/columns, then seed an empty database."""
     from aion import seed
 
     with connect() as conn:
+        _rebuild_reward_tables(conn)
         for table, (cols, constraints) in SCHEMA.items():
             body = ", ".join([f"{c} {d}" for c, d in cols] + constraints)
             conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({body})")

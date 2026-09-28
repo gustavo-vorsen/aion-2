@@ -14,6 +14,8 @@ class PageDef:
     title: str
     icon: str
     tabs: tuple[str, ...] = field(default_factory=tuple)  # tab keys that each get their own "done" mark
+    tag: str = ""  # short note shown right-aligned in the sidebar; "{n}" = weekly entries of `entries`
+    entries: str = ""  # activity category whose weekly entry limit fills "{n}"
 
 
 SECTIONS: dict[str, list[PageDef]] = {
@@ -29,21 +31,32 @@ SECTIONS: dict[str, list[PageDef]] = {
         PageDef("leveling_schedule", "Leveling schedule", "calendar_month"),
         PageDef("planner", "Weekly planner", "auto_awesome"),
     ],
-    "Content": [
+    # Split by reset cycle: only Daily Duties / daily Supply Requests reset daily; everything else is weekly.
+    "Daily content": [
+        PageDef("daily_duties", "Daily duties", "task_alt"),
+        PageDef("supply_requests", "Supply requests", "local_shipping"),
+    ],
+    "Weekly content": [
+        PageDef("shugo", "Shugo Festival", "celebration", tag="{n} keys", entries="Shugo Festival"),
+        PageDef("ascension", "Ascension Trial", "military_tech", tag="{n} entries", entries="Ascension Trial"),
+        PageDef("nightmare", "Nightmare", "dark_mode", tag="{n} entries", entries="Nightmare"),
         PageDef("odyle_budget", "Odyle budget", "battery_charging_full"),
         PageDef("expeditions", "Expedition", "bolt"),
         PageDef("transcendence", "Transcendence", "auto_awesome_motion"),
-        PageDef("nightmare", "Nightmare", "dark_mode"),
-        PageDef("ascension", "Ascension Trial", "military_tech"),
+        PageDef("invasion", "Dimensional Invasion", "crisis_alert", tag="{n} claims", entries="Dimensional Invasion"),
         PageDef("abyss", "Abyss", "public"),
         PageDef("abyss_commands", "Abyss commands", "assignment", ("normal", "abyss")),
         PageDef("pvp", "PvP / battlefields", "sports_kabaddi"),
-        PageDef("awakening", "Awakening Battle", "sports_martial_arts"),
-        PageDef("subjugation", "Subjugation", "groups"),
+        PageDef("awakening", "Awakening Battle", "sports_martial_arts", tag="{n} entries", entries="Awakening Battle"),
+        PageDef("subjugation", "Subjugation", "groups", tag="{n} entries", entries="Subjugation"),
         PageDef("field_bosses", "Field bosses", "skull"),
-        PageDef("shugo", "Shugo Festival", "celebration"),
-        PageDef("invasion", "Dimensional Invasion", "crisis_alert"),
-        PageDef("daily_weekly", "Daily & weekly content", "event_repeat"),
+        PageDef("season_weekly", "Season weekly missions", "event_repeat"),
+        PageDef("weekly_content", "Dungeons & raid", "date_range"),
+    ],
+    "Season content": [
+        PageDef("season", "Season", "calendar_month"),
+    ],
+    "Progression": [
         PageDef("progression", "Progression", "workspace_premium",
                 ("skills", "daevanion", "side_quests", "strongholds", "hidden_dungeons", "feathers", "genus",
                  "titles", "wardrobe", "wings", "amulet_belt", "pantheon", "arcana")),
@@ -62,47 +75,131 @@ SECTIONS: dict[str, list[PageDef]] = {
 PAGES = {p.file: p for pages in SECTIONS.values() for p in pages}
 
 
-def marks() -> dict[str, bool]:
-    if "_progress" not in st.session_state or st.session_state.get("_progress_run") != st.session_state.get("_run_id"):
-        df = db.read_table("progress")
-        st.session_state["_progress"] = {k: bool(v) for k, v in zip(df["key"], df["done"])}
-        st.session_state["_progress_run"] = st.session_state.get("_run_id")
-    return st.session_state["_progress"]
+# Fill percentages: every editable table reports its filled / total required cells while the page renders;
+# the totals are stored per page and per tab and drive the sidebar, the title badge and the tab labels.
+
+def fills() -> dict[str, tuple[float, float]]:
+    if "_fills" not in st.session_state or st.session_state.get("_fills_run") != st.session_state.get("_run_id"):
+        df = db.read_table("fill")
+        st.session_state["_fills"] = {k: (f, t) for k, f, t in zip(df["key"], df["filled"], df["total"])}
+        st.session_state["_fills_run"] = st.session_state.get("_run_id")
+    return st.session_state["_fills"]
 
 
-def page_fraction(page: PageDef, m: dict[str, bool]) -> float:
+def fraction(key: str) -> float | None:
+    """Stored fill fraction; None when the page / tab has nothing to fill. Not visited yet = 0."""
+    filled, total = fills().get(key, (0.0, 1.0))
+    return None if total <= 0 else min(filled / total, 1.0)
+
+
+def begin(page_file: str) -> None:
+    st.session_state["_fill_acc"] = {}
+    st.session_state["_fill_page"] = page_file
+    st.session_state["_fill_ctx"] = page_file
+
+
+def track(filled: float, total: float) -> None:
+    """Called by editable widgets / tables: add their filled and total required cells to the current page / tab."""
+    ctx = st.session_state.get("_fill_ctx")
+    if ctx is None or total <= 0:
+        return
+    acc = st.session_state["_fill_acc"]
+    f, t = acc.get(ctx, (0.0, 0.0))
+    acc[ctx] = (f + filled, t + total)
+
+
+def pause_tracking() -> None:
+    """Tables drawn until resume_tracking() don't count (their cells were already counted elsewhere)."""
+    st.session_state["_fill_paused"] = st.session_state.get("_fill_ctx")
+    st.session_state["_fill_ctx"] = None
+
+
+def resume_tracking() -> None:
+    st.session_state["_fill_ctx"] = st.session_state.pop("_fill_paused", None)
+
+
+def finish() -> None:
+    """Store this page's fill counts; rerun once when they changed so badges and labels are current."""
+    page = st.session_state.get("_fill_page")
+    if page is None:
+        return
+    acc = dict(st.session_state.get("_fill_acc", {}))
+    acc.setdefault(page, (0.0, 0.0))
+    acc[page] = (sum(f for f, _ in acc.values()), sum(t for _, t in acc.values()))
+    auto = auto_fraction(page)
+    if auto is not None:
+        acc[page] = (auto, 1.0)
+    old = fills()
+    changed = False
+    for key, (f, t) in acc.items():
+        if old.get(key) != (f, t):
+            db.upsert("fill", {"key": key}, {"filled": f, "total": t})
+            changed = True
+    st.session_state["_fill_page"] = None
+    if changed:
+        st.session_state.pop("_fills_run", None)
+        st.rerun()
+
+
+def auto_fraction(page_file: str) -> float | None:
+    """Completion computed from the page's full tier tables (all layers), not only the visible one."""
+    from aion import tier_specs, ui
+
+    spec = tier_specs.AUTO_DONE.get(page_file)
+    if spec is None:
+        return None
+    done = ui.tier_completion(spec.category, spec.key, spec.groups, spec.columns)
+    return sum(done.values()) / len(done) if done else 0.0
+
+
+def page_fraction(page: PageDef) -> float | None:
     if page.tabs:
-        return sum(bool(m.get(f"{page.file}:{t}")) for t in page.tabs) / len(page.tabs)
-    return 1.0 if m.get(page.file) else 0.0
+        parts = [x for x in (fraction(f"{page.file}:{t}") for t in page.tabs) if x is not None]
+        return sum(parts) / len(parts) if parts else None
+    return fraction(page.file)
 
 
-def section_fraction(section: str, m: dict[str, bool]) -> float:
-    pages = SECTIONS[section]
-    return sum(page_fraction(p, m) for p in pages) / len(pages)
+def _mean(pages) -> float:
+    parts = [x for x in (page_fraction(p) for p in pages) if x is not None]
+    return sum(parts) / len(parts) if parts else 0.0
 
 
-def overall_fraction(m: dict[str, bool]) -> float:
-    pages = list(PAGES.values())
-    return sum(page_fraction(p, m) for p in pages) / len(pages)
+def section_fraction(section: str) -> float:
+    return _mean(SECTIONS[section])
 
 
-def _save(key: str, widget_key: str) -> None:
-    db.upsert("progress", {"key": key}, {"done": bool(st.session_state[widget_key])})
-    st.session_state.pop("_progress_run", None)  # reload marks on this rerun
+def overall_fraction() -> float:
+    return _mean(PAGES.values())
 
 
-def done_toggle(key: str, label: str = "Done filling") -> bool:
-    wk = f"progress__{key}"
-    return st.toggle(label, value=bool(marks().get(key)), key=wk, on_change=_save, args=(key, wk),
-                     help="Mark as done when you have finished filling this in. Drives the sidebar progress.")
+def fill_badge(frac: float | None) -> None:
+    if frac is None:
+        return
+    st.badge(f"{frac:.0%} filled", icon=":material/check_circle:" if frac >= 1 else ":material/error:",
+             color="green" if frac >= 1 else "orange")
 
 
-def tab_done(page_file: str, tab: str, label: str = "Done filling this tab") -> bool:
-    return done_toggle(f"{page_file}:{tab}", label)
+def tab_done(page_file: str, tab: str) -> None:
+    """Start of a tab's content: its tables count toward this tab; shows the tab's fill badge."""
+    st.session_state["_fill_ctx"] = f"{page_file}:{tab}"
+    fill_badge(fraction(f"{page_file}:{tab}"))
 
 
 DONE_MARK = ":green[:material/check_circle:]"
 TODO_MARK = ":orange[:material/error:]"
+
+
+def page_tag(page: PageDef, data) -> str:
+    """Sidebar tag; "{n}" becomes the weekly entries for this account's membership setting."""
+    if not page.entries:
+        return page.tag
+    from aion import calc
+
+    acts = data.activities[data.activities["category"] == page.entries]
+    if acts.empty:
+        return ""
+    n = calc.weekly_max_attempts(acts.iloc[0], bool(data.settings.get("account_membership", True)), data.settings)
+    return page.tag.format(n=f"{n:g}" if n is not None else "∞")
 
 
 def mark(done: bool) -> str:
@@ -110,8 +207,11 @@ def mark(done: bool) -> str:
 
 
 def tab_label(page_file: str, tab: str, label: str) -> str:
-    """Inner-tab label with a green tick when done, an exclamation mark otherwise."""
-    return f"{label} {mark(bool(marks().get(f'{page_file}:{tab}')))}"
+    """Inner-tab label led by a green tick when filled, an exclamation mark otherwise, plus its fill %."""
+    frac = fraction(f"{page_file}:{tab}")
+    if frac is None:
+        return label
+    return f"{mark(frac >= 1)} {label} · {frac:.0%}"
 
 
 def _remember_tab(page_file: str, widget_key: str, key_by_label: dict[str, str]) -> None:

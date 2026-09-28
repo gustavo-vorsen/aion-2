@@ -9,7 +9,7 @@ st.caption(
 )
 ui.category_page(
     ["Instanced PvP"], key="pvp",
-    columns=["name", "enabled", "main_default", "alt_default", "scope", "cadence", "attempts_per_reset",
+    columns=["name", "scope", "cadence", "attempts_per_reset",
              "weekly_claim_limit", "duration_minutes", "consumes_abyss_time", "ap_cap_category",
              "ruleset", "source_status", "notes"],
     reward_keys=["abyss_points", "silver_medals", "rank_points", "kinah_bound"],

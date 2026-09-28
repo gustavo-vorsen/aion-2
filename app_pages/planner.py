@@ -40,6 +40,15 @@ def remove_session_dialog(removable: pd.DataFrame):
         st.rerun()
 
 
+def delete_session(rk: dict) -> None:
+    if rk["number"] in {int(x) for x in db.read_table("leveling_blocks")["session"].dropna()}:
+        st.toast(f"Session {rk['number']} is used by the Leveling schedule and can't be removed.", icon=":material/block:")
+        return
+    db.execute("DELETE FROM session_items WHERE session = ?", [rk["number"]])
+    db.delete("sessions", rk)
+    session_ui._bump("planner_grid")
+
+
 with st.container(border=True):
     st.subheader("Sessions")
     st.caption("Sessions used by the **Leveling schedule** are always here. Add your own (e.g. a permanent daily loop) "
@@ -51,6 +60,7 @@ with st.container(border=True):
         sess[["number", "name", "from_leveling", "permanent", "times_per_week", "notes"]], "sessions_editor",
         [{"number": int(n)} for n in sess["number"]],
         on_update=lambda rk, ch: db.update("sessions", rk, {k: v for k, v in ch.items() if k not in ("number", "from_leveling")}),
+        on_delete=delete_session,
         disabled=["number", "from_leveling"],
         column_config={
             "number": ui.cc.NumberColumn("Session #"),
