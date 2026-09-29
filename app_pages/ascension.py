@@ -13,13 +13,13 @@ ui.category_page(
     show_rewards=False,
 )
 
-BRACKETS = [f"Score ≥ {n:,}" for n in (10, 100, 200, 500, 1000, 1500, 2000, 2500, *range(3000, 14001, 1000))]
-TRIALS = ["Chamber of the Dead"]  # one tab per trial; other trials may have different tables
+# Trials > difficulty (with its required GS) > score brackets; the structure is editable on the page.
 ui.tier_reward_editor(
-    "Ascension Trial", {t: BRACKETS for t in TRIALS}, key="ascension_tiers", tier_label="Score",
-    columns=[("Silentium", "silentium", ""), ("Ariel fragments", "ariel_shards", ""),
-             ("Manastone/Soulstone Chest", "manastones", ""), ("Stigma Shards", "stigma_shards", ""),
-             ("Enhancement Stones", "enhancement_stones", "")],
-    picker=False, group_names=("Trial",), group_icons=("emoji_events",),
-    help_text="Rewards by final score (reference values). Add trials with Edit trials; add score rows in the table.",
+    "Ascension Trial", {}, key="ascension_tiers", tier_label="Score",
+    columns=[("Enhancement Stones", "enhancement_stones", ""), ("Growth Pet Chest", "growth_pet_chest", ""),
+             ("Amplify Stone Fragments", "amplify_fragments", ""),
+             ("Ascension Binding Chest", "ascension_binding_chest", "")],
+    picker=False, group_names=("Trial", "Difficulty"), group_icons=("emoji_events", "signal_cellular_alt"),
+    help_text="Rewards by final score (Global playtest data, Elyos). Add trials / difficulties with Edit; add score "
+              "rows in the table.",
 )

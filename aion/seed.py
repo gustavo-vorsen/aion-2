@@ -98,6 +98,11 @@ CURRENCIES = [
     ("thick_balaur", "Thick Balaur material", "material", 0, 1, 0, None, 1.0),
     ("manastone_soulstone", "Manastone / Soulstone", "material", 0, 1, 0, None, 0.5),
     ("wrathful_keys", "Wrathful keys (Mind / Will / Ego)", "material", 0, 1, 0, None, 3.0),
+    ("growth_pet_chest", "Growth Pet Chest", "material", 0, 1, 0, None, 0.5),
+    ("gear_boss_set", "Boss set gear", "gear", 0, 1, 0, None, 2.0),
+    ("field_boss_artwork_scraps", "Field boss artwork scraps", "material", 0, 1, 0, None, 0.2),
+    ("spiritstone", "Spiritstone", "material", 0, 1, 0, None, 0.3),
+    ("ascension_binding_chest", "Ascension Binding Chest", "material", 0, 1, 0, None, 1.0),
     ("scrolls_common", "Common scrolls", "material", 0, 1, 0, None, 0.2),
 ]
 

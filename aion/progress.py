@@ -49,17 +49,23 @@ SECTIONS: dict[str, list[PageDef]] = {
         PageDef("pvp", "PvP / battlefields", "sports_kabaddi"),
         PageDef("awakening", "Awakening Battle", "sports_martial_arts", tag="{n} entries", entries="Awakening Battle"),
         PageDef("subjugation", "Subjugation", "groups", tag="{n} entries", entries="Subjugation"),
-        PageDef("field_bosses", "Field bosses", "skull"),
         PageDef("season_weekly", "Season weekly missions", "event_repeat"),
         PageDef("weekly_content", "Dungeons & raid", "date_range"),
     ],
     "Season content": [
         PageDef("season", "Season", "calendar_month"),
     ],
+    "One-time content": [
+        PageDef("feathers", "Feathers", "flight"),
+        PageDef("hidden_dungeons", "Hidden dungeons", "door_front"),
+        PageDef("strongholds", "Strongholds", "fort"),
+    ],
+    "Bosses": [
+        PageDef("bosses", "Bosses", "skull", ("field", "world")),
+    ],
     "Progression": [
         PageDef("progression", "Progression", "workspace_premium",
-                ("skills", "daevanion", "side_quests", "strongholds", "hidden_dungeons", "feathers", "genus",
-                 "titles", "wardrobe", "wings", "amulet_belt", "pantheon", "arcana")),
+                ("skills", "daevanion", "side_quests", "genus", "titles", "wardrobe", "wings", "amulet_belt", "pantheon", "arcana")),
     ],
     "Economy": [
         PageDef("economy", "Economy / shops", "storefront", ("calculator", "all")),

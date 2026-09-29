@@ -152,7 +152,7 @@ def reward_grid_counts(activity_ids: list[int]) -> tuple[float, float]:
     raw = raw[raw["activity_id"].isin(activity_ids) & (raw["pool"].fillna("") == "")] if not raw.empty else raw
     keys = raw["currency_key"].unique() if not raw.empty else []
     have = set(zip(raw["activity_id"], raw["currency_key"])) if not raw.empty else set()
-    return float(len(have)), float(len(activity_ids) * len(keys))
+    return float(len(have)), float(len(activity_ids) * len(keys))  # every cell: a number or "-" (stored as 0)
 
 
 def _sort_filter(df: pd.DataFrame, row_keys: list[dict], key: str, config: dict) -> tuple[pd.DataFrame, list[dict]]:
@@ -189,10 +189,54 @@ def _sort_filter(df: pd.DataFrame, row_keys: list[dict], key: str, config: dict)
     return df.loc[order].reset_index(drop=True), [row_keys[i] for i in order]
 
 
+DASH = "-"  # typed in a number cell: "doesn't have" (counts as filled)
+NUMBER_OR_DASH = r"^\s*(-|[0-9][0-9,]*(\.[0-9]+)?)?\s*$"
+
+
+def _dash_text(v, sentinel: float):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if float(v) == sentinel:
+        return DASH
+    f = float(v)
+    return f"{f:,.0f}" if f == int(f) else f"{f:,.4f}".rstrip("0").rstrip(".")
+
+
+def _dash_value(s, sentinel: float):
+    if s is None or str(s).strip() == "":
+        return None
+    s = str(s).strip()
+    return sentinel if s == DASH else float(s.replace(",", ""))
+
+
 def editor(df: pd.DataFrame, key: str, row_keys: list[dict], on_update: Callable,
-           on_insert: Callable | None = None, on_delete: Callable | None = None, **kw) -> pd.DataFrame:
-    """st.data_editor that writes every change straight to SQLite (and counts toward the page's fill %)."""
-    track_fill(df, {c for c in (kw.get("disabled") or []) if isinstance(c, str)})
+           on_insert: Callable | None = None, on_delete: Callable | None = None, track: bool = True,
+           dash: dict[str, float] | None = None, **kw) -> pd.DataFrame:
+    """st.data_editor that writes every change straight to SQLite (and counts toward the page's fill %).
+    track=False: the caller reports its own fill. dash: {column: stored value} for number columns that also accept
+    "-" ("doesn't have"); they are shown as text and saved as that value."""
+    if track:
+        track_fill(df, {c for c in (kw.get("disabled") or []) if isinstance(c, str)})
+    dash = {c: v for c, v in (dash or {}).items() if c in df.columns}
+    if dash:
+        df = df.copy()
+        config = dict(kw.get("column_config") or {})
+        for c, sentinel in dash.items():
+            df[c] = pd.Series([_dash_text(v, sentinel) for v in df[c]], index=df.index, dtype="object")
+            old = config.get(c)
+            label = old.get("label") if isinstance(old, dict) else None
+            help_ = (old.get("help") if isinstance(old, dict) else None) or ""
+            config[c] = cc.TextColumn(label or c, validate=NUMBER_OR_DASH,
+                                      help=(help_ + " " if help_ else "") + "A number, or - if it doesn't have it.")
+        kw["column_config"] = config
+
+        def parse(changes: dict) -> dict:
+            return {k: (_dash_value(v, dash[k]) if k in dash else v) for k, v in changes.items()}
+
+        _upd, _ins = on_update, on_insert
+        on_update = lambda rk, ch: _upd(rk, parse(ch))  # noqa: E731
+        if _ins:
+            on_insert = lambda new: _ins(parse(new))  # noqa: E731
     num_rows = "dynamic" if (on_insert and on_delete) else "add" if on_insert else "delete" if on_delete else "fixed"
     wkey = f"{key}__v{st.session_state.get(f'_ver_{key}', 0)}"
     data, row_keys = _sort_filter(df.reset_index(drop=True), row_keys, key, kw.get("column_config") or {})
@@ -323,7 +367,7 @@ def activity_editor(categories: list[str], key: str, columns: list[str] | None =
         defaults={"category": new_category or categories[0], "sort_order": int(acts["sort_order"].max() or 0) + 1,
                   **({"cadence": cadences[0]} if cadences else {}), **({"mode": mode} if mode else {}),
                   **(_shared_defaults(acts[acts["category"].isin(categories)]) if shared_from_category else {})},
-        column_config=activity_columns(),
+        column_config=activity_columns(), dash={"entry_item_level": -1, "recommended_item_level": -1},
     )
 
 
@@ -636,7 +680,8 @@ def tier_reward_editor(category: str, tiers: TierGroups, columns: list[tuple[str
 
         editor(df, tab_key, [{"row": r} for r in rows], on_update=upd, on_insert=ins, on_delete=delete,
                column_config={tier_label: cc.TextColumn(tier_label, pinned=True, required=True),
-                              **{c[0]: cc.NumberColumn(c[0], format="%,.0f", min_value=0) for c in columns}})
+                              **{c[0]: cc.NumberColumn(c[0], format="%,.0f", min_value=0) for c in columns}},
+               dash={c[0]: 0.0 for c in columns})
 
     def filled(path: tuple[str, ...]) -> str:
         rows = rows_of.get(path, [])
@@ -772,7 +817,8 @@ def wide_reward_editor(activity_ids: list[int], key: str, currency_keys: list[st
 
     editor(df, key, [{"id": int(i)} for i in activity_ids], on_update=upd, disabled=[label],
            column_config={label: cc.TextColumn(label, pinned=True),
-                          **{names[k]: cc.NumberColumn(names[k], format="%,.2f", min_value=0) for k in keys}})
+                          **{names[k]: cc.NumberColumn(names[k], format="%,.2f", min_value=0) for k in keys}},
+           dash={names[k]: 0.0 for k in keys})
 
 
 def _pools_key(key: str) -> str:

@@ -11,7 +11,9 @@ all_items = progression_ui.items()
 wide = progression_ui.rewards_wide()
 progression_ui.summary(all_items, wide)
 
-tabs = progress.tabs("progression", [(s.key, f":material/{s.icon}: {s.label}") for s in progression_ui.SYSTEMS])
-for tab, sys in zip(tabs, progression_ui.SYSTEMS):
+# Feathers, sealed dungeons and strongholds have their own pages (One-time content); still in the totals above.
+SHOWN = [s for s in progression_ui.SYSTEMS if s.key not in ("feathers", "hidden_dungeons", "strongholds")]
+tabs = progress.tabs("progression", [(s.key, f":material/{s.icon}: {s.label}") for s in SHOWN])
+for tab, sys in zip(tabs, SHOWN):
     with tab:
         progression_ui.system_tab(sys, all_items, wide)

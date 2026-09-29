@@ -223,6 +223,54 @@ SCHEMA: dict[str, tuple[list[tuple[str, str]], list[str]]] = {
         ],
         ["PRIMARY KEY (character_id, activity_id)"],
     ),
+    "pity": (
+        [
+            ("id", "INTEGER PRIMARY KEY"),
+            ("category", "TEXT DEFAULT 'Expedition'"),
+            ("mode", "TEXT"),
+            ("dungeon", "TEXT"),
+            ("claims_needed", "REAL"),  # cube claims that fill the Condensed Cube Energy
+            ("reward", "TEXT DEFAULT ''"),  # guaranteed reward (choose one)
+            ("repeats", "BOOLEAN DEFAULT 1"),
+            ("max_times", "REAL"),  # blank = no limit
+            ("notes", "TEXT DEFAULT ''"),
+        ],
+        [],
+    ),
+    "feather_regions": (
+        [
+            ("id", "INTEGER PRIMARY KEY"),
+            ("faction", "TEXT"),  # Elyos | Asmodian
+            ("region", "TEXT"),
+            ("count", "REAL"),
+            ("collected", "REAL DEFAULT 0"),
+            ("notes", "TEXT DEFAULT ''"),
+        ],
+        [],
+    ),
+    "monolith_levels": (
+        [
+            ("id", "INTEGER PRIMARY KEY"),
+            ("monolith", "TEXT"),
+            ("level", "INTEGER"),
+            ("feathers", "REAL"),  # feathers for this level (cumulative is computed)
+            ("reward", "TEXT DEFAULT ''"),
+        ],
+        [],
+    ),
+    "one_time": (
+        [
+            ("id", "INTEGER PRIMARY KEY"),
+            ("kind", "TEXT"),  # hidden_dungeon | stronghold
+            ("faction", "TEXT"),  # Elyos | Asmodian
+            ("region", "TEXT"),
+            ("name", "TEXT"),
+            ("level", "REAL"),
+            ("done", "BOOLEAN DEFAULT 0"),
+            ("notes", "TEXT DEFAULT ''"),
+        ],
+        [],
+    ),
     "fill": (
         [
             ("key", "TEXT PRIMARY KEY"),  # page file, or "page:tab"
